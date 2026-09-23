@@ -1,0 +1,14 @@
+# Exported batches and logs (may contain TIPS content; never commit)
+*.zip
+_progress_log_*.csv
+_batch_*
+
+# Packed extension builds
+*.crx
+*.pem
+
+# OS / editor
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
