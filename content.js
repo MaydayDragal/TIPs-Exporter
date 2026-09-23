@@ -395,6 +395,7 @@
     S.history.push({ ...p.summary, n: p.n, errors: p.summary.errors.length, date: now });
     await saveDone(); await saveHistory();
     S.pending = null;
+    railFlash = Date.now() + 6000; setTimeout(render, 6100);
     setMsg(`Downloaded ${p.fname}.`);
     render();
     if (S.settings.autoContinue && nextBatch()) setTimeout(() => prepareBatch(), Math.max(800, randDelay()));
@@ -463,126 +464,102 @@
     S.recent.unshift({ fname, tips: found.map(f => f.tips), v: found.length === 1 ? found[0].version : null, sizeMB: sum.sizeMB, docs: found.length, date: new Date().toISOString() });
     S.recent = S.recent.slice(0, 10);
     await saveRecent();
+    railFlash = Date.now() + 6000; setTimeout(render, 6100);
     render();
   }
 
   // ---------------------------------------------------------------- UI
+  // A full-height drawer on the right, styled with the Reader's own theme (xy-* tokens, Corpo fonts the page
+  // already loads), opened from the Reader's ⋮ menu (or the toolbar icon). The page to its left is dimmed.
   const host = document.createElement('div');
-  host.style.cssText = 'position:fixed;z-index:2147483647;right:16px;bottom:16px;';
+  host.style.cssText = 'position:fixed;z-index:2147483000;top:0;left:0;width:0;height:0;';
   const root = host.attachShadow({ mode: 'open' });
-  let visible = false, showSettings = false, liText = '', view = 'single';   // view: 'single' | 'bulk'
-  let fabFlash = null, lastView = 'single';
+  let visible = false, justOpened = false, showSettings = false, liText = '', view = 'single';   // view: 'single' | 'bulk'
+  let railFlash = 0, lastView = 'single';
   let sDraft = {};   // unsaved Settings edits, kept across re-renders until Save / close / Re-detect
-  const S_FIELDS = ['s_bs', 's_delay', 's_delay2', 's_ps', 's_outlet', 's_user', 's_ver'];   // {text, until}: short status on the minimised button after a toolbar download
-  // Palette: navy fur, azure stripes, sky highlights, white belly, black legs.
+  const S_FIELDS = ['s_bs', 's_delay', 's_delay2', 's_ps', 's_outlet', 's_user', 's_ver'];
   const css = `
-  :host{all:initial;--bg:#0d1633;--line:#22346a;--row:#14214a;--inset:#0a1128;--edge:#2e4584;--btn2:#1a2a5c;--foot:#070c1c;
-    --tx:#f4f7ff;--tx2:#dbe5fb;--mut:#a9bde6;--dim:#5b6fa8;--sky:#8fc3f0;--acc:#2e8ff0;--ink:#08143a;--cur:#1f5fb8;
-    --ok:#4cc38a;--okbg:#16352a;--warn:#ffc47a;--warnbg:#2a1f14;--warnbd:#6b4a1f;--bad:#ff9c94;--badbd:#6e3a3a}
-  *{box-sizing:border-box;font-family:Barlow,"Segoe UI",system-ui,sans-serif}
-  .mono,textarea,code,pre{font-family:"JetBrains Mono",Consolas,ui-monospace,monospace}
-  .num,.h{font-family:"Barlow Condensed",Bahnschrift,"Arial Narrow",sans-serif;font-weight:600;line-height:1}
-  .fab{display:flex;align-items:center;gap:8px;background:var(--bg);color:var(--tx);border:1px solid var(--line);border-top:3px solid var(--acc);border-radius:20px;padding:8px 14px;font-size:13px;font-weight:600;letter-spacing:.02em;cursor:grab;box-shadow:0 6px 18px rgba(0,0,0,.35);user-select:none}
-  .mark{width:10px;height:10px;border-radius:2px;background:var(--acc);flex:none}
-  .panel{width:400px;max-height:calc(100vh - 24px);overflow:auto;background:var(--bg);color:var(--tx);border:1px solid var(--line);border-top:3px solid var(--acc);border-radius:10px;box-shadow:0 14px 36px rgba(0,0,0,.35);font-size:13px}
-  header{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:6px 6px 6px 14px;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--bg);cursor:grab;user-select:none;z-index:1}
-  header.dragging,.fab.dragging{cursor:grabbing}
-  .brand{display:flex;align-items:center;gap:10px;min-width:0} .brand b{font-size:15px;font-weight:600;letter-spacing:.02em;white-space:nowrap}
-  .status{font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-  .ib{width:36px;height:36px;display:inline-flex;align-items:center;justify-content:center;background:none;border:0;border-radius:6px;color:var(--mut);cursor:pointer;flex:none}
-  .ib:hover{background:var(--row);color:var(--tx)} .ib:disabled{opacity:.4;cursor:default;background:none}
-  section{padding:14px;border-bottom:1px solid var(--line);display:flex;flex-direction:column;gap:10px}
-  .lbl{font-size:11px;font-weight:600;letter-spacing:.08em;color:var(--sky);text-transform:uppercase}
-  .h{font-size:24px;line-height:1.1}
-  .mut{color:var(--mut);font-size:12px} .dim{color:var(--dim)} .tx2{color:var(--tx2)}
-  .ok{color:var(--ok)} .warn{color:var(--warn)} .bad{color:var(--bad)} .acc{color:var(--acc)}
-  textarea{width:100%;min-height:92px;padding:10px 12px;background:var(--inset);border:1px solid var(--edge);border-radius:6px;color:var(--tx);font-size:14px;line-height:1.5;resize:vertical}
-  textarea:focus{outline:none;border-color:var(--acc)} textarea::placeholder{color:#7f93c4} textarea:disabled{opacity:.6}
-  .chips{display:flex;flex-wrap:wrap;gap:6px} .chip{padding:3px 8px;border:1px solid var(--edge);border-radius:4px;font-size:12px;color:var(--tx2)} .chip.off{opacity:.45;text-decoration:line-through}
-  .btn{height:44px;display:inline-flex;align-items:center;justify-content:center;gap:8px;padding:0 14px;border-radius:6px;font-size:14px;font-weight:500;cursor:pointer;border:1px solid var(--edge);background:var(--btn2);color:var(--tx)}
-  .btn:hover{filter:brightness(1.15)} .btn:disabled{opacity:.45;cursor:default;filter:none}
-  .btn.pri{height:46px;background:var(--acc);border-color:var(--acc);color:var(--ink);font-size:15px;font-weight:600}
-  .btn.bad{background:none;border-color:var(--badbd);color:var(--bad)}
-  .btn.sm{height:32px;padding:0 10px;font-size:12px}
-  .btn.wide{justify-content:space-between;padding:0 16px}
-  .btn .hint{font-size:12px;font-weight:500;opacity:.75}
-  .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
-  .spread{display:flex;justify-content:space-between;align-items:baseline;gap:8px}
-  .g21{display:grid;grid-template-columns:minmax(0,2fr) minmax(0,1fr);gap:8px} .g11{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
-  .item{display:flex;gap:10px;padding:10px 12px;background:var(--row);border:1px solid var(--line);border-radius:6px}
-  .item.warnbox{background:var(--warnbg);border-color:var(--warnbd)} .item.cur{background:var(--inset);border-color:var(--acc)} .item.q{background:none}
-  .item svg{flex:none;margin-top:1px} .body{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
-  .stats{display:grid;border:1px solid var(--line);border-radius:6px} .stats>div{padding:10px 8px;border-right:1px solid var(--line);min-width:0} .stats>div:last-child{border-right:0}
-  .stats .num{font-size:26px} .stats .lbl{margin-top:4px;letter-spacing:.06em}
-  .big .num{font-size:34px}
-  .bar{height:6px;background:var(--line);border-radius:3px;overflow:hidden} .bar i{display:block;height:100%;background:var(--acc)}
-  .cells{display:grid;gap:3px} .cells span{height:12px;border-radius:2px;background:var(--line)} .cells .d{background:var(--acc)} .cells .c{background:var(--cur);box-shadow:inset 0 0 0 1px var(--acc)}
-  .cells.thin span{height:6px}
-  ol.steps{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:4px;font-size:13px} ol.steps li{display:flex;gap:8px}
-  .rec{display:flex;align-items:center;gap:10px;padding:8px;border-radius:6px} .rec.new{background:var(--row)}
-  .recs{display:flex;flex-direction:column;padding:0 6px 10px} .recs-h{padding:14px 14px 6px}
-  .linkrow{width:100%;display:flex;align-items:center;justify-content:space-between;gap:8px;padding:12px 14px;background:var(--row);border:0;border-bottom:1px solid var(--line);color:var(--tx2);font-size:13px;text-align:left;cursor:pointer}
-  .linkrow:hover{filter:brightness(1.15)} .linkrow b{font-weight:600} .linkrow span{display:flex;align-items:center;gap:6px}
-  .tools{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));border-bottom:1px solid var(--line)}
-  .tools button{height:56px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;background:none;border:0;border-right:1px solid var(--line);color:var(--tx2);font-size:12px;cursor:pointer}
-  .tools button:last-child{border-right:0} .tools button:hover{background:var(--row)} .tools button:disabled{opacity:.4;cursor:default;background:none}
-  footer{display:flex;align-items:center;gap:8px;padding:8px 14px;background:var(--foot);font-size:12px;color:var(--mut)}
-  .dot{width:7px;height:7px;border-radius:4px;flex:none}
-  label.ck{display:flex;gap:8px;align-items:center;font-size:13px;color:var(--tx2);cursor:pointer} label.ck:has(input:disabled){cursor:default}
-  input[type=checkbox]{appearance:none;-webkit-appearance:none;display:inline-grid;place-content:center;width:18px;height:18px;margin:0;flex:none;border:1.5px solid var(--edge);border-radius:4px;background:var(--inset);cursor:pointer;transition:background-color .12s,border-color .12s}
-  input[type=checkbox]::after{content:'';width:4px;height:9px;margin-top:-2px;border:solid var(--ink);border-width:0 2.5px 2.5px 0;transform:rotate(45deg) scale(0);transition:transform .12s}
-  input[type=checkbox]:hover{border-color:var(--sky)}
-  input[type=checkbox]:checked{background:var(--acc);border-color:var(--acc)} input[type=checkbox]:checked::after{transform:rotate(45deg) scale(1)}
-  input[type=checkbox]:focus-visible{outline:2px solid var(--sky);outline-offset:2px}
-  input[type=checkbox]:disabled{cursor:default;opacity:.45} input[type=checkbox]:disabled:hover{border-color:var(--edge)}
-  .fld{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:13px;color:var(--tx2)}
-  .fld input{width:140px;height:32px;padding:0 8px;background:var(--inset);border:1px solid var(--edge);border-radius:6px;color:var(--tx);font-size:13px}
-  .fld input.s{width:72px} .fld .pair{display:flex;align-items:center;gap:6px}
-  .fgrid{display:grid;grid-template-columns:1fr 1fr;gap:8px 10px;padding:10px 12px;background:var(--row);border:1px solid var(--line);border-radius:6px} .fgrid label.ck{font-size:12px}
-  .note{margin:10px 14px 0;padding:8px 10px;border:1px solid var(--edge);background:var(--row);border-radius:6px;font-size:12px;color:var(--tx2);display:flex;gap:8px;align-items:flex-start} .note span{flex:1}
-  .note button{background:none;border:0;color:var(--mut);cursor:pointer;padding:0;font-size:14px;line-height:1}
-  .okring{width:40px;height:40px;flex:none;display:flex;align-items:center;justify-content:center;border-radius:20px;background:var(--okbg);color:var(--ok)}
+  :host{all:initial}
+  *{box-sizing:border-box}
+  .dim,.dr{--f:"Mercedes-Benz Corpo S Text Regular","XF CorpoS normal",Arial,sans-serif;--ft:"Mercedes-Benz Corpo A Title Condensed","XF CorpoA normal",Georgia,serif;
+    --tx:#333333;--lab:#595959;--dis:#9b9b9b;--blue:#006EFF;--blueH:#0058cc;--blueP:#002c66;--soft:#e6f1ff;--sel:#cce2ff;--softP:#99c5ff;
+    --grey:#595959;--greyH:#474747;--bar:#dedede;--barB:#cdcdcd;--stroke:#7a7a7a;--div:#dedede;--row2:#eeeeee;
+    --ok:#018601;--okbg:#e6f3e6;--al:#EE7100;--albg:#fdf1e6;--er:#EA060A;--erbg:#fde6e7;--sh:0 1px 3px 0 rgba(0,0,0,.2)}
+  .dim{position:fixed;left:0;right:0;bottom:0;background:rgba(0,0,0,.35)}
+  .dr{position:fixed;right:0;bottom:0;width:min(560px,95vw);display:flex;flex-direction:column;background:#fff;border-left:1px solid var(--stroke);
+    box-shadow:-6px 0 20px rgba(0,0,0,.25);color:var(--tx);font:14px/1.4 var(--f);-webkit-font-smoothing:antialiased}
+  .dr.anim{animation:tipsx-in .15s ease-out} @keyframes tipsx-in{from{transform:translateX(32px);opacity:.5}}
+  .hd{flex:none;display:flex;justify-content:space-between;align-items:center;gap:8px;padding:8px 8px 4px 20px}
+  .ttl{display:flex;align-items:baseline;gap:12px;min-width:0} .ttl h2{margin:0;font:400 24px/1.2 var(--ft);white-space:nowrap}
+  .st{font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .hb{display:flex;align-items:center;flex:none}
+  .ib{width:48px;height:48px;border:0;border-radius:0;background:transparent;color:var(--tx);display:inline-flex;align-items:center;justify-content:center;cursor:pointer}
+  .ib:hover{background:var(--soft)} .ib[aria-pressed=true]{background:var(--sel)}
+  .sep{width:1px;height:32px;background:var(--div);margin:0 6px}
+  .tabs{flex:none;display:flex;margin:0 20px}
+  .tab{flex:1;height:48px;border:0;border-bottom:3px solid var(--dis);border-radius:0;background:#fff;font:14px var(--f);color:var(--tx);cursor:pointer}
+  .tab:hover{background:var(--soft)} .tab[aria-selected=true]{background:var(--sel);border-bottom-color:var(--blue)}
+  .note{flex:none;display:flex;gap:8px;align-items:flex-start;margin:12px 20px 0;padding:8px 12px;background:var(--soft);font-size:13px}
+  .note span{flex:1} .note button{border:0;background:none;cursor:pointer;font-size:16px;line-height:1;color:var(--lab);padding:0}
+  .body{flex:1;min-height:0;overflow:auto;padding:16px 20px 20px;display:flex;flex-direction:column;gap:16px}
+  .body::-webkit-scrollbar{width:6px}.body::-webkit-scrollbar-thumb{background:#cacaca;border-radius:1ex}
+  .ft{flex:none;min-height:64px;display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 16px 10px 20px;background:var(--row2);flex-wrap:wrap}
+  .sess{display:flex;align-items:center;gap:6px;font-size:13px;color:var(--lab)} .acts{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end;margin-left:auto}
+  h3{margin:0;font:400 22px/1.2 var(--ft);color:var(--tx)}
+  .sec{display:flex;flex-direction:column;gap:8px}
+  .mut{color:var(--lab)} .sm{font-size:13px} .okc{color:var(--ok)} .acc{color:var(--blue)} .alc{color:var(--al)} .erc{color:var(--er)}
+  .b{height:40px;display:inline-flex;align-items:center;justify-content:center;gap:8px;padding:0 16px;border:0;border-radius:0;font:14px var(--f);cursor:pointer;white-space:nowrap}
+  .ft .b{height:44px}
+  .b.pri{background:var(--blue);color:#fff;box-shadow:var(--sh)} .b.pri:hover{background:var(--blueH)} .b.pri:active{background:var(--blueP)}
+  .b.sec{background:var(--grey);color:#fff;box-shadow:var(--sh)} .b.sec:hover{background:var(--greyH)}
+  .b.bar{background:var(--bar);color:var(--tx);border:1px solid var(--barB)} .b.bar:hover{background:var(--barB)}
+  .b.dan{background:#fff;color:var(--er);border:1px solid var(--er)} .b.dan:hover{background:var(--erbg)}
+  .b.sm{height:32px;padding:0 10px;font-size:13px} .b.full{width:100%}
+  .b:disabled,.b:disabled:hover{background:#bdbdbd;color:#fff;border-color:#bdbdbd;box-shadow:none;cursor:default}
+  .b:focus-visible,.ib:focus-visible,.tab:focus-visible{outline:2px solid var(--blue);outline-offset:-2px}
+  textarea{width:100%;min-height:96px;padding:10px 16px;border:1px solid var(--stroke);border-radius:0;background:#fff;font:14px/1.4 var(--f);color:var(--tx);resize:vertical}
+  textarea:hover,.fld input:hover{border-color:#474747}
+  textarea:focus,.fld input:focus{outline:none;border-color:var(--blue);box-shadow:inset 0 0 0 1px var(--blue)}
+  textarea::placeholder{color:var(--dis)} textarea:disabled{color:var(--dis);border-color:#bdbdbd}
+  .badge{display:inline-block;min-width:18px;padding:2px 6px;border-radius:11px;background:var(--blue);color:#fff;font-size:12px;line-height:12px;text-align:center}
+  .cnt{display:flex;align-items:center;gap:8px;font-size:16px}
+  .card{min-height:56px;padding:8px 16px;background:#fff;box-shadow:var(--sh);display:flex;align-items:center;gap:12px} .card.sel{background:var(--sel)}
+  .card>svg,.card .ic{flex:none} .card .bd{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
+  .sp{display:flex;justify-content:space-between;align-items:baseline;gap:8px}
+  .ban{display:flex;gap:12px;align-items:flex-start;padding:12px 16px} .ban.ok{background:var(--okbg)} .ban.al{background:var(--albg)} .ban.er{background:var(--erbg)}
+  .ban .ic{display:flex;margin-top:1px} .ban.ok .ic{color:var(--ok)} .ban.al .ic{color:var(--al)} .ban.er .ic{color:var(--er)}
+  .ban .bd{flex:1;min-width:0;display:flex;flex-direction:column;gap:4px} .ban b{font-weight:700}
+  .kv>div{display:grid;grid-template-columns:140px minmax(0,1fr);padding:10px 0;border-bottom:1px solid var(--div)} .kv>div>span:first-child{color:var(--lab)}
+  .pbar{height:8px;background:var(--bar)} .pbar i{display:block;height:100%;background:var(--blue)} .pbar.thin{height:4px}
+  ol.steps{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:4px} ol.steps li{display:flex;gap:8px}
   .spin{display:inline-flex;animation:tipsx-spin .9s linear infinite} @keyframes tipsx-spin{to{transform:rotate(360deg)}}
-  .fab .ok{color:var(--ok)} .fab .lab{font-weight:500;color:var(--tx2);white-space:nowrap}
-  code{font-size:11px;color:var(--sky);background:var(--row);border:1px solid var(--line);padding:0 4px;border-radius:3px}
-  pre{white-space:pre-wrap;font-size:11px;max-height:120px;overflow:auto;background:var(--inset);padding:6px;border-radius:5px;color:var(--tx2);margin:6px 0 0}
-  details summary{cursor:pointer}
-  table{width:100%;border-collapse:collapse;font-size:12px} td,th{padding:4px;border-bottom:1px solid var(--line);text-align:left;color:var(--tx2)} th{color:var(--sky);font-weight:600}`;
+  .grid2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px} .g21{display:grid;grid-template-columns:minmax(0,2fr) minmax(0,1fr);gap:8px}
+  .rule{padding:12px 0;border-top:1px solid var(--div);border-bottom:1px solid var(--div);display:flex;flex-direction:column;gap:14px}
+  label.tg{display:flex;align-items:center;justify-content:space-between;gap:12px;cursor:pointer}
+  .tgl{appearance:none;-webkit-appearance:none;width:36px;height:16px;border-radius:8px;background:var(--bar);position:relative;cursor:pointer;flex:none;margin:0}
+  .tgl::after{content:'';position:absolute;top:-2px;left:-2px;width:20px;height:20px;border-radius:50%;background:#fff;box-shadow:var(--sh)}
+  .tgl:checked{background:var(--softP)} .tgl:checked::after{left:18px;background:var(--blue)} .tgl:focus-visible{outline:2px solid var(--blue);outline-offset:3px}
+  label.ck{display:flex;align-items:center;gap:10px;cursor:pointer} label.ck:has(input:disabled){cursor:default}
+  .ck input{appearance:none;-webkit-appearance:none;width:18px;height:18px;border:1px solid var(--stroke);border-radius:0;background:#fff;margin:0;display:inline-grid;place-content:center;cursor:pointer;flex:none}
+  .ck input::after{content:'';width:4px;height:9px;margin-top:-2px;border:solid #fff;border-width:0 2px 2px 0;transform:rotate(45deg) scale(0)}
+  .ck input:checked{background:var(--blue);border-color:var(--blue)} .ck input:checked::after{transform:rotate(45deg) scale(1)}
+  .ck input:disabled{opacity:.5;cursor:default} .ck input:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
+  .fgrid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+  .fld{display:flex;align-items:center;justify-content:space-between;gap:12px;color:var(--lab)} .fld .pair{display:flex;align-items:center;gap:6px}
+  .fld input{width:150px;height:40px;padding:0 12px;border:1px solid var(--stroke);border-radius:0;font:14px var(--f);color:var(--tx)} .fld input.s{width:80px}
+  details summary{cursor:pointer;height:40px;display:flex;align-items:center;justify-content:space-between;padding:0 16px;border:1px solid var(--stroke);color:var(--lab);list-style:none}
+  details summary::-webkit-details-marker{display:none}
+  pre{white-space:pre-wrap;font-size:12px;max-height:140px;overflow:auto;background:#fff;padding:6px;margin:6px 0 0}
+  table{width:100%;border-collapse:collapse;font-size:13px;margin-top:8px} td,th{padding:6px 4px;border-bottom:1px solid var(--div);text-align:left} th{font-weight:700}
+  code{font-size:12px;color:var(--lab)}`;
   const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
   function setMsg(m) { S.msg = m; render(); }
-
-  // ---- position / dragging (position is remembered)
-  function placeHost() {
-    const pos = S.settings.pos;
-    if (!pos) { host.style.left = host.style.top = ''; host.style.right = '16px'; host.style.bottom = '16px'; return; }
-    const r = host.getBoundingClientRect();
-    const w = r.width || 160, h = r.height || 40;
-    const left = Math.min(Math.max(0, pos.left), Math.max(0, window.innerWidth - w));
-    const top = Math.min(Math.max(0, pos.top), Math.max(0, window.innerHeight - Math.min(h, 60)));
-    host.style.right = host.style.bottom = 'auto';
-    host.style.left = left + 'px'; host.style.top = top + 'px';
-  }
-  // Returns true if the pointer actually moved (so a click on the FAB is not treated as a drag).
-  function startDrag(ev, handle, onClick) {
-    if (ev.button !== 0 || (ev.target.closest && ev.target.closest('button') && ev.target !== handle)) return;
-    ev.preventDefault();
-    const r = host.getBoundingClientRect();
-    const dx = ev.clientX - r.left, dy = ev.clientY - r.top, sx = ev.clientX, sy = ev.clientY;
-    let moved = false;
-    handle.classList.add('dragging');
-    const move = e => {
-      if (!moved && Math.hypot(e.clientX - sx, e.clientY - sy) < 4) return;
-      moved = true;
-      S.settings.pos = { left: e.clientX - dx, top: e.clientY - dy }; placeHost();
-    };
-    const up = () => {
-      window.removeEventListener('pointermove', move, true); window.removeEventListener('pointerup', up, true);
-      handle.classList.remove('dragging');
-      if (moved) saveSettings(); else if (onClick) onClick();
-    };
-    window.addEventListener('pointermove', move, true); window.addEventListener('pointerup', up, true);
-  }
-  window.addEventListener('resize', () => placeHost());
+  // top of the drawer = bottom of the Reader's black header
+  function topOffset() { const n = document.querySelector('xy-c-side-navigation'); const t = n ? Math.round(n.getBoundingClientRect().top) : 56; return t > 0 && t < 200 ? t : 56; }
+  window.addEventListener('resize', () => { if (visible) render(); });
+  // Esc closes the drawer (and doesn't reach the Reader while the drawer is open)
+  window.addEventListener('keydown', e => { if (visible && e.key === 'Escape' && e.isTrusted) { e.stopPropagation(); e.preventDefault(); openDrawer(false); } }, true);
+  function openDrawer(open) { if (open && !visible) justOpened = true; visible = open; if (!open) { showSettings = false; sDraft = {}; } render(); }
 
   const svg = (d, w = 18, sw = 2) => `<svg width="${w}" height="${w}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="${sw}" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${d}</svg>`;
   const I = {
@@ -612,214 +589,180 @@
     return d.toISOString().slice(0, 10);
   };
   const runLabel = run => { const it = run.items[run.results.length]; const l = run.label.startsWith(it ? it.tips : '\0') ? run.label.slice(it.tips.length).replace(/^ – /, '') : run.label; return l || 'starting…'; };
-  const stats4 = (a) => `<div class="stats" style="grid-template-columns:repeat(${a.length},minmax(0,1fr))">${a.map(([v, l]) => `<div><div class="num">${esc(v)}</div><div class="lbl">${esc(l)}</div></div>`).join('')}</div>`;
-  const cells = (n, done, cur, thin) => `<div class="cells${thin ? ' thin' : ''}" style="grid-template-columns:repeat(${n},minmax(0,1fr))">${Array.from({ length: n }, (_, k) => `<span class="${k < done ? 'd' : k === cur ? 'c' : ''}"></span>`).join('')}</div>`;
 
-  // ---- single LI
+  const banner = (kind, title, bodyHtml = '', action = '') => `<div class="ban ${kind}"><span class="ic">${svg(kind === 'ok' ? '<path d="M20 6L9 17l-5-5"></path>' : '<path d="M12 9v4"></path><path d="M12 17h.01"></path><path d="M10.3 3.9L1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"></path>', 20, 2)}</span><div class="bd"><b>${title}</b>${bodyHtml}</div>${action}</div>`;
+  const kv = rows => `<div class="kv">${rows.map(([a, b]) => `<div><span>${esc(a)}</span><span>${esc(b)}</span></div>`).join('')}</div>`;
+  const pbar = (pct, thin, id) => `<div class="pbar${thin ? ' thin' : ''}"><i ${id ? `id="${id}"` : ''} style="width:${Math.max(0, Math.min(100, pct)).toFixed(1)}%"></i></div>`;
+
+  // ---- single LI  (each view returns {body, actions})
   function vSingle() {
     const sg = S.single, run = S.run && S.run.kind === 'single' ? S.run : null;
     const blocked = !!(S.run || S.pending), F = S.settings.files;
-    let h = '';
-    if (run) h += `<div id="runbox">${vSingleRun(run)}</div>`;
-    else if (sg && sg.phase === 'done') h += vSingleDone(sg);
-    else {
-      const looking = sg && sg.phase === 'looking';
-      h += `<section>
-        <label for="li" class="h">Download LI documents</label>
-        <textarea id="li" rows="3" placeholder="LI42.10-P-078779&#10;078780, 061245 …" ${blocked || looking ? 'disabled' : ''}>${esc(liText)}</textarea>`;
-      if (sg && sg.phase === 'looked') h += `</section>` + vLooked(sg);
-      else h += `<div class="mut">Full numbers, or a unique ending such as 078779 once the index is built. Separate several with spaces, commas or new lines.</div>
-        <div class="chips"><span class="chip">Current PDF</span><span class="chip">Every prior version</span><span class="chip">Attachments</span><span class="chip${F.histCsv || F.histJson ? '' : ' off'}">Revision history</span><span class="chip${F.attCsv ? '' : ' off'}">Links list</span></div>
-        <button class="btn pri wide" id="look" ${blocked || looking ? 'disabled' : ''}><span class="row">${I.search}${looking ? 'Looking up…' : 'Look up'}</span><span class="hint">Ctrl+Enter</span></button>
-        ${blocked ? '<div class="mut">A bulk batch is running or waiting for approval – finish or discard it first.</div>' : ''}
-      </section>`;
-    }
-    if (!run) h += vRecent(sg);
-    return h + vBulkRow();
+    if (run) return { body: `<div id="runbox">${vSingleRun(run)}</div>`, actions: `<button class="b dan" id="cancel">${I.x}Cancel download</button>` };
+    if (sg && sg.phase === 'done') return vSingleDone(sg);
+    const looking = sg && sg.phase === 'looking', looked = sg && sg.phase === 'looked';
+    let body = `<div class="sec"><h3>Download LI documents</h3>
+        <textarea id="li" rows="3" aria-label="LI numbers" placeholder="LI42.10-P-078779&#10;078780, 061245 …" ${blocked || looking ? 'disabled' : ''}>${esc(liText)}</textarea>
+        ${looked ? '' : '<span class="mut">Full numbers, or a unique ending such as 078779 once the index is built. Separate several with spaces, commas or new lines. Ctrl+Enter looks them up.</span>'}</div>`;
+    if (looked) body += vLooked(sg);
+    else body += `<span class="mut">Includes the current PDF, every prior version, attachments${F.histCsv || F.histJson ? ', revision history' : ''}${F.attCsv ? ' and the links list' : ''}.</span>`
+      + (blocked ? '<span class="alc">A bulk batch is running or waiting for approval – finish or discard it first.</span>' : '');
+    body += vRecent(sg);
+    const actions = looked
+      ? `<button class="b bar" id="clear">Clear</button><button class="b pri" id="dlfound" ${sg.found.length ? '' : 'disabled'}>${I.dl}Download ${sg.found.length || ''}</button>`
+      : `<button class="b pri" id="look" ${blocked || looking ? 'disabled' : ''}>${I.search}${looking ? 'Looking up…' : 'Look up'}</button>`;
+    return { body, actions };
   }
   function vLooked(sg) {
     const n = sg.found.length + sg.problems.length;
-    return `<div class="recs-h spread"><span class="lbl">Found in TIPS</span><span class="mut">${sg.found.length} of ${n} entr${n === 1 ? 'y' : 'ies'}</span></div>
-      <section style="padding-top:4px">
-      ${sg.found.map(f => `<div class="item"><span class="ok">${I.check}</span><div class="body">
-        <div class="spread"><span class="mono">${esc(f.tips)}</span><span class="mut">v${esc(f.version)} · ${Math.max(0, f.version - 1)} prior</span></div>
-        <span class="tx2">${esc(f.title)}</span>${f.src ? `<span class="mut">from “${esc(f.src)}”</span>` : ''}</div></div>`).join('')}
-      ${sg.problems.map(p => `<div class="item warnbox"><span class="warn">${I.warn}</span><div class="body">
-        <span class="mono warn">${esc(p.token)}</span><span>${esc(p.text)}</span>
-        ${p.matches ? `<span class="mono mut">${esc(p.matches.join(', '))}${p.count > 3 ? ' …' : ''}</span>` : ''}</div></div>`).join('')}
-      <div class="g21"><button class="btn pri" id="dlfound" ${sg.found.length ? '' : 'disabled'}>${I.dl}Download ${sg.found.length || ''}</button><button class="btn" id="clear">Clear</button></div>
-      ${sg.found.length ? `<div class="mono mut">→ ${esc(selectionName(sg.found))}</div>` : ''}
-      </section>`;
+    return `<div class="cnt">Found in TIPS : <span class="badge">${sg.found.length}</span><span class="mut" style="font-size:14px">of ${n} entr${n === 1 ? 'y' : 'ies'}</span></div>
+      ${sg.found.map(f => `<div class="card"><span class="okc ic">${svg('<path d="M20 6L9 17l-5-5"></path>', 20, 2.2)}</span><div class="bd">
+        <div class="sp"><span>${esc(f.tips)}</span><span class="mut sm">v${esc(f.version)} · ${Math.max(0, f.version - 1)} prior</span></div>
+        <span>${esc(f.title)}</span>${f.src ? `<span class="mut sm">from “${esc(f.src)}”</span>` : ''}</div></div>`).join('')}
+      ${sg.problems.map(p => banner('al', esc(p.token), `<span>${esc(p.text)}</span>${p.matches ? `<span class="mut sm">${esc(p.matches.join(', '))}${p.count > 3 ? ' …' : ''}</span>` : ''}`)).join('')}
+      ${sg.found.length ? `<span class="mut sm">Saves as ${esc(selectionName(sg.found))}</span>` : ''}`;
   }
   function vSingleRun(run) {
     const doneN = run.results.length, st = run.step, gi = st ? ['data', 'pdf', 'att', 'prior'].indexOf(st.g) : -1;
     const frac = !st ? 0 : st.g === 'data' ? .1 : st.g === 'pdf' ? .2 : st.g === 'att' ? .2 + .3 * st.k / st.n : .5 + .5 * st.k / st.n;
-    const pct = 100 * (doneN + frac) / run.total;
     let steps = '';
     if (st) {
       const L = [];
       L.push(gi <= 1 ? ['cur', st.g === 'data' ? 'Topic data' : `Current PDF v${st.v}`] : ['done', 'Topic data &amp; current PDF']);
       if (run.attN) L.push(gi === 2 ? ['cur', `Attachment ${st.k} of ${st.n}`] : gi > 2 ? ['done', `${run.attN} attachment${run.attN > 1 ? 's' : ''}`] : null);
       if (gi === 3) L.push(['cur', `Prior version v${st.k} of ${st.n}`]);
-      steps = `<ol class="steps">${L.filter(Boolean).map(([k, t]) => k === 'done' ? `<li class="mut"><span class="ok">✓</span>${t}</li>` : `<li><span class="acc">›</span>${t}</li>`).join('')}</ol>`
-        + (gi === 3 && st.n <= 40 ? cells(st.n, st.k - 1, st.k - 1, true) : '');
+      steps = `<ol class="steps">${L.filter(Boolean).map(([k, t]) => k === 'done' ? `<li class="mut"><span class="okc">✓</span>${t}</li>` : `<li><span class="acc spin">${svg('<circle cx="12" cy="12" r="8" stroke-opacity=".25"></circle><path d="M12 4a8 8 0 0 1 8 8"></path>', 16, 2.4)}</span>${t}</li>`).join('')}</ol>`;
     }
-    return `<section style="padding-top:18px">
-        <div class="spread" style="align-items:flex-end"><div><div class="lbl">Document</div>
-          <div class="num" style="font-size:52px">${Math.min(doneN + 1, run.total)}<span class="dim">/${run.total}</span></div></div>
-          <div class="mut" style="text-align:right">saves to Downloads<br>when finished</div></div>
-        <div class="bar"><i id="pbar" style="width:${pct.toFixed(1)}%"></i></div>
-      </section>
-      <section style="padding-top:12px;gap:8px">
+    return `<div class="sec"><div class="sp"><h3>Downloading</h3><span style="font-size:16px">Document ${Math.min(doneN + 1, run.total)} of ${run.total}</span></div>${pbar(100 * (doneN + frac) / run.total, false, 'pbar')}</div>
       ${run.items.map((it, k) => {
         const r = run.results[k];
-        if (r) return `<div class="item"><div class="body"><div class="spread"><span class="mono">${esc(it.tips)}</span>${r.status === 'ok' ? '<span class="ok">✓ done</span>' : '<span class="bad">failed</span>'}</div></div></div>`;
-        if (k === doneN) return `<div class="item cur"><div class="body" style="gap:8px"><div class="spread"><span class="mono">${esc(it.tips)}</span><span class="acc" style="font-size:12px">in progress</span></div>
-          ${steps || `<div class="mut" id="plabel">${esc(runLabel(run))}</div>`}</div></div>`;
-        return `<div class="item q"><div class="spread" style="flex:1"><span class="mono mut">${esc(it.tips)}</span><span class="mut">queued</span></div></div>`;
+        if (r) return `<div class="card"><div class="bd"><div class="sp"><span>${esc(it.tips)}</span>${r.status === 'ok' ? '<span class="okc">✓ done</span>' : '<span class="erc">failed</span>'}</div></div></div>`;
+        if (k === doneN) return `<div class="card sel"><div class="bd" style="gap:8px"><div class="sp"><b>${esc(it.tips)}</b><span class="acc">in progress</span></div>
+          ${steps || `<span class="mut" id="plabel">${esc(runLabel(run))}</span>`}</div></div>`;
+        return `<div class="card"><div class="bd"><div class="sp"><span class="mut">${esc(it.tips)}</span><span class="mut">queued</span></div></div></div>`;
       }).join('')}
-      </section>
-      <section><button class="btn bad" id="cancel">${I.x}Cancel download</button>
-        <div class="mut">Cancelling saves nothing. Bulk export progress isn't affected either way.</div></section>`;
+      <span class="mut">Saves to your Downloads folder when finished. Cancelling saves nothing; bulk export progress isn't affected.</span>`;
   }
   function vSingleDone(sg) {
     const m = sg.sum, np = sg.problems.length;
-    return `<section style="padding-top:18px">
-        <div class="row" style="flex-wrap:nowrap;gap:12px"><span class="okring">${I.checkBig}</span>
-          <div class="body"><span class="h">Saved to Downloads</span><span class="mono mut" style="overflow-wrap:anywhere">${esc(sg.fname)}</span></div></div>
-        ${stats4([[m.sizeMB, 'MB'], [`${m.ok}/${m.docs}`, 'Docs'], [m.att, 'Attach.'], [m.prev, 'Prior ver.']])}
-        ${m.errors.length ? `<div class="item warnbox"><div class="body"><details><summary class="warn" style="font-weight:600">${m.errors.length} file${m.errors.length > 1 ? 's' : ''} could not be saved</summary><pre>${esc(m.errors.join('\n'))}</pre></details><span class="mut">Also listed in _errors.txt inside the zip.</span></div></div>` : ''}
-        ${np ? `<div class="item warnbox"><div class="body"><span class="warn" style="font-weight:600">${np} entr${np > 1 ? 'ies' : 'y'} skipped</span>
-          ${sg.problems.map(p => `<span><span class="mono">${esc(p.token)}</span> – ${esc(p.text)}</span>`).join('')}</div>
-          <button class="btn sm" id="fix" style="align-self:center;border-color:var(--warnbd);color:var(--warn);background:none">Fix</button></div>` : ''}
-        <button class="btn pri" id="newdl">New download</button>
-      </section>`;
+    const body = banner('ok', 'Saved to Downloads', `<span class="mut" style="overflow-wrap:anywhere">${esc(sg.fname)}</span>`)
+      + kv([['Size', `${m.sizeMB} MB`], ['Documents', `${m.ok} of ${m.docs}`], ['Attachments', m.att], ['Prior versions', m.prev]])
+      + (m.errors.length ? banner('er', `${m.errors.length} file${m.errors.length > 1 ? 's' : ''} could not be saved`, `<details><summary>Show details</summary><pre>${esc(m.errors.join('\n'))}</pre></details><span class="mut sm">Also listed in _errors.txt inside the zip.</span>`) : '')
+      + (np ? banner('al', `${np} entr${np > 1 ? 'ies' : 'y'} skipped`, sg.problems.map(p => `<span>${esc(p.token)} – ${esc(p.text)}</span>`).join(''), '<button class="b bar sm" id="fix" style="align-self:center">Fix</button>') : '')
+      + vRecent(sg);
+    return { body, actions: '<button class="b pri" id="newdl">New download</button>' };
   }
   function vRecent(sg) {
     if (!S.recent.length) return '';
     const blocked = !!(S.run || S.pending);
-    return `<div class="recs-h"><div class="lbl">Recent downloads</div></div><div class="recs">
+    return `<div class="sec" style="padding-top:8px"><h3>Recent downloads</h3>
       ${S.recent.slice(0, 5).map((r, k) => {
         const name = r.docs === 1 ? r.tips[0] : `${r.docs} documents`;
         const meta = (r.docs === 1 ? `v${r.v} · ` : `${r.tips.slice(0, 2).join(', ')}${r.docs > 2 ? ' …' : ''} · `) + `${r.sizeMB} MB · ${when(r.date)}`;
-        return `<div class="rec${k === 0 && sg && sg.phase === 'done' && sg.fname === r.fname ? ' new' : ''}"><div class="body"><span class="mono">${esc(name)}</span><span class="mut">${esc(meta)}</span></div>
-          <button class="ib" data-redo="${k}" aria-label="Download ${esc(name)} again" title="Look up again" style="border:1px solid var(--edge)" ${blocked ? 'disabled' : ''}>${I.redo}</button></div>`;
+        return `<div class="card${k === 0 && sg && sg.phase === 'done' && sg.fname === r.fname ? ' sel' : ''}"><div class="bd"><span>${esc(name)}</span><span class="mut sm">${esc(meta)}</span></div>
+          <button class="b bar" style="width:40px;padding:0" data-redo="${k}" aria-label="Download ${esc(name)} again" title="Look up again" ${blocked ? 'disabled' : ''}>${I.redo}</button></div>`;
       }).join('')}</div>`;
-  }
-  function vBulkRow() {
-    const run = S.run && S.run.kind === 'bulk' ? S.run : null, nb = nextBatch();
-    const right = run ? `<span class="acc">${esc(run.title)} · ${run.i}/${run.total}</span>` : S.pending ? '<span class="ok">Batch ready for review</span>'
-      : S.index.length ? `${fmtN(doneCount())} / ${fmtN(S.index.length)}${nb ? ` · batch ${nb} next` : ' · all done'}` : 'no index yet';
-    return `<button class="linkrow" id="tobulk"><b>Bulk export</b><span class="mut">${right}${I.next}</span></button>`;
   }
 
   // ---- bulk
   function vBulk() {
     const s = S.settings, run = S.run && S.run.kind === 'bulk' ? S.run : null, pen = S.pending, dc = doneCount(), nb = nextBatch(), pendN = pendingItems().length;
     const busy = !!S.run, pct = S.index.length ? 100 * dc / S.index.length : 0;
-    let h = `<button class="linkrow" id="tosingle"><span>${I.back}<b>Single LI</b></span><span class="mut">download specific documents</span></button>
-      <div class="stats big" style="grid-template-columns:repeat(3,minmax(0,1fr));border:0;border-bottom:1px solid var(--line);border-radius:0">
-        <div style="padding:14px"><div class="num">${fmtN(dc)}</div><div class="lbl">Exported</div></div>
-        <div style="padding:14px"><div class="num">${fmtN(pendN)}</div><div class="lbl">Pending</div></div>
-        <div style="padding:14px"><div class="num acc">${nb ?? (S.index.length ? '✓' : '—')}</div><div class="lbl">Next batch</div></div></div>
-      <section style="gap:6px"><div class="bar"><i style="width:${pct.toFixed(1)}%"></i></div>
-        <div class="spread mut"><span>${pct.toFixed(1)}% of ${fmtN(S.index.length)} topics</span><span>~${remainingBatches()} batches left · ${s.batchSize} each</span></div></section>`;
-    if (run) h += `<section style="padding-top:16px">
-        <div class="spread" style="align-items:flex-end"><div><div class="lbl">${esc(run.title)}${run.paused ? ' <span class="warn">· paused</span>' : ''}</div>
-          <div class="num" style="font-size:52px">${run.i}<span class="dim">/${run.total}</span></div></div><div class="mut" style="text-align:right">documents<br>in this batch</div></div>
-        ${run.total <= 60 ? cells(run.total, run.i - 1, run.i - 1) : `<div class="bar"><i id="pbar" style="width:${(100 * (run.i - 1) / run.total).toFixed(1)}%"></i></div>`}
-        <div class="item cur"><div class="body"><span class="mono">${esc((run.items[run.results.length] || {}).tips || '')}</span><span class="mut" id="plabel">${esc(runLabel(run))}</span></div></div>
-        <div class="g11"><button class="btn" id="pause">${run.paused ? I.play + 'Resume' : I.pause + 'Pause'}</button><button class="btn bad" id="cancel">${I.x}Cancel</button></div>
-        <div class="mut">Nothing downloads until you approve the batch. Cancel discards it; its documents stay pending.</div></section>`;
-    else if (S.run) h += `<section><div class="item cur"><div class="body"><span>A single-LI download is running</span><span class="mut" id="plabel">${esc(runLabel(S.run))}</span></div></div>
-        <button class="btn bad" id="cancel">${I.x}Cancel download</button></section>`;
-    else if (pen) { const m = pen.summary; h += `<section style="padding-top:16px">
-        <div><div class="lbl">Batch ${pen.n} ready</div><div class="mono" style="font-size:14px;margin-top:4px">${esc(m.fname)}</div></div>
-        ${stats4([[m.sizeMB, 'MB'], [`${m.ok}/${m.docs}`, 'Docs'], [m.att, 'Attach.'], [m.prev, 'Prior ver.']])}
-        <div class="mono mut">${esc(m.range)}</div>
-        ${m.errors.length ? `<div class="item warnbox"><div class="body"><details><summary class="warn" style="font-weight:600">${m.errors.length} error${m.errors.length > 1 ? 's' : ''}</summary><pre>${esc(m.errors.join('\n'))}</pre></details></div></div>` : '<div class="ok" style="font-size:12px">No errors</div>'}
-        <div class="g21"><button class="btn pri" id="approve">${I.check}Approve &amp; download</button><button class="btn" id="discard">Discard</button></div></section>`; }
-    else h += `<section><button class="btn pri wide" id="prep" ${!S.index.length || !nb ? 'disabled' : ''}><span>${nb ? `Prepare batch ${nb}` : S.index.length ? 'Everything exported' : 'Build the index first'}</span><span class="row" style="font-weight:500">${nb ? `${Math.min(s.batchSize, pendN)} docs ${I.arrow}` : ''}</span></button></section>`;
-    h += `<section style="flex-direction:row;gap:16px;flex-wrap:wrap">
-        <label class="ck"><input type="checkbox" id="autoc" ${s.autoContinue ? 'checked' : ''}> Auto-continue</label>
-        <label class="ck"><input type="checkbox" id="autoa" ${s.autoApprove ? 'checked' : ''}> Auto-approve</label></section>
-      <div class="tools">
-        <button id="refresh" ${!S.index.length || busy ? 'disabled' : ''}>${I.redo}Check new</button>
-        <button id="build" ${busy ? 'disabled' : ''}>${I.list}${S.index.length ? 'Rebuild' : 'Build index'}</button>
-        <button id="imp" ${busy ? 'disabled' : ''}>${I.up}Import log</button>
-        <button id="exp" ${!S.index.length ? 'disabled' : ''}>${I.dlS}Save log</button>
-      </div><input type="file" id="file" accept=".csv" style="display:none">`;
-    if (S.history.length) h += `<section><details><summary class="lbl">Batch history (${S.history.length} in this browser)</summary>
-        <table><tr><th>#</th><th>Size</th><th>Docs</th><th>Att.</th><th>Prev.</th><th>Err.</th></tr>
-        ${S.history.slice().reverse().map(x => `<tr><td>${x.n}</td><td>${x.sizeMB} MB</td><td>${x.ok}/${x.docs}</td><td>${x.att}</td><td>${x.prev}</td><td>${x.errors}</td></tr>`).join('')}</table></details></section>`;
-    return h;
+    let body = `<div class="sec"><h3>Progress</h3>
+        <div class="cnt">Total topics : <span class="badge">${S.index.length ? fmtN(S.index.length) : '0'}</span></div>
+        <div style="display:flex;gap:24px;flex-wrap:wrap"><span>Exported : <b>${fmtN(dc)}</b></span><span>Pending : <b>${fmtN(pendN)}</b></span><span>Next batch : <b>${nb ?? '–'}</b></span></div>
+        ${pbar(pct)}<span class="mut">${pct.toFixed(1)}% · about ${remainingBatches()} batches of ${s.batchSize} left</span></div>`;
+    let actions = '';
+    const toggles = `<div class="rule"><label class="tg">Auto-continue after each download<input type="checkbox" class="tgl" id="autoc" ${s.autoContinue ? 'checked' : ''}></label>
+        <label class="tg">Auto-approve (download without asking)<input type="checkbox" class="tgl" id="autoa" ${s.autoApprove ? 'checked' : ''}></label></div>`;
+    if (run) {
+      body += `<div class="sec"><div class="sp"><h3>${esc(run.title)}${run.paused ? ' <span class="alc" style="font:14px var(--f)">· paused</span>' : ''}</h3><span style="font-size:16px">Document ${run.i} of ${run.total}</span></div>
+          ${pbar(100 * (run.i - 1) / run.total, false, 'pbar')}</div>
+        <div class="card sel"><div class="bd"><b>${esc((run.items[run.results.length] || {}).tips || '')}</b><span class="mut" id="plabel">${esc(runLabel(run))}</span></div></div>
+        <span class="mut">Nothing downloads until you approve the batch. Cancel discards it; its documents stay pending.</span>` + toggles;
+      actions = `<button class="b dan" id="cancel">Cancel batch</button><button class="b sec" id="pause">${run.paused ? I.play + 'Resume' : I.pause + 'Pause'}</button>`;
+    } else if (S.run) {
+      body += `<div class="card sel"><div class="bd"><b>A single-LI download is running</b><span class="mut" id="plabel">${esc(runLabel(S.run))}</span></div></div>`;
+      actions = `<button class="b dan" id="cancel">${I.x}Cancel download</button>`;
+    } else if (pen) {
+      const m = pen.summary;
+      body = banner('ok', `Batch ${pen.n} is ready`, `<span class="mut">${esc(m.fname)}</span>`)
+        + kv([['Size', `${m.sizeMB} MB`], ['Documents', `${m.ok} of ${m.docs}`], ['Attachments', m.att], ['Prior versions', m.prev], ['Range', m.range]])
+        + (m.errors.length ? banner('al', `${m.errors.length} file${m.errors.length > 1 ? 's' : ''} could not be saved`, `<details><summary>Show details</summary><pre>${esc(m.errors.join('\n'))}</pre></details>`) : '<span class="okc">No errors</span>');
+      actions = `<button class="b bar" id="discard">Discard</button><button class="b pri" id="approve">${I.check}Approve &amp; download</button>`;
+    } else {
+      body += toggles + `<div class="sec"><h3>Index &amp; progress log</h3><div class="grid2">
+          <button class="b bar" id="refresh" ${!S.index.length ? 'disabled' : ''}>${I.redo}Check new</button>
+          <button class="b bar" id="build">${S.index.length ? 'Rebuild index' : 'Build index'}</button>
+          <button class="b bar" id="imp">Import log</button>
+          <button class="b bar" id="exp" ${!S.index.length ? 'disabled' : ''}>${I.dl}Save log</button>
+        </div><input type="file" id="file" accept=".csv" style="display:none"></div>`;
+      if (S.history.length) body += `<details><summary>Batch history (${S.history.length})<span>›</span></summary>
+          <table><tr><th>#</th><th>Size</th><th>Docs</th><th>Att.</th><th>Prev.</th><th>Err.</th></tr>
+          ${S.history.slice().reverse().map(x => `<tr><td>${x.n}</td><td>${x.sizeMB} MB</td><td>${x.ok}/${x.docs}</td><td>${x.att}</td><td>${x.prev}</td><td>${x.errors}</td></tr>`).join('')}</table></details>`;
+      actions = `<button class="b pri" id="prep" ${!S.index.length || !nb ? 'disabled' : ''}>${I.dl}${nb ? `Prepare batch ${nb} · ${Math.min(s.batchSize, pendN)} documents` : S.index.length ? 'Everything exported' : 'Build the index first'}</button>`;
+    }
+    if (busy && !run && !S.run) actions = '';
+    return { body, actions };
   }
 
   // ---- settings
   function vSettings() {
     const s = S.settings;
-    return `<section>
-      <div class="lbl">Settings</div>
+    const body = `<h3>Settings</h3>
       <label class="fld">Batch size <input class="s" type="number" id="s_bs" value="${s.batchSize}" min="1" max="500"></label>
-      <label class="fld">Delay between docs (ms) <span class="pair"><input class="s" type="number" id="s_delay" value="${s.delayMs}" min="0" step="250" aria-label="Minimum delay"> to <input class="s" type="number" id="s_delay2" value="${s.delayMaxMs}" min="0" step="250" aria-label="Maximum delay"></span></label>
-      <label class="fld">Search page size <span class="pair"><span class="mut">${s.pageSizeSrc === 'detected' ? '<span class="ok">✓</span> matches Reader' : s.pageSizeSrc === 'manual' ? 'set manually' : '<span class="warn">not detected</span>'}</span><input class="s" type="number" id="s_ps" value="${s.pageSize}" min="1" max="500"></span></label>
+      <label class="fld">Delay between documents (ms) <span class="pair"><input class="s" type="number" id="s_delay" value="${s.delayMs}" min="0" step="250" aria-label="Minimum delay"> – <input class="s" type="number" id="s_delay2" value="${s.delayMaxMs}" min="0" step="250" aria-label="Maximum delay"></span></label>
+      <label class="fld">Search page size <span class="pair"><span class="${s.pageSizeSrc === 'detected' ? 'okc' : s.pageSizeSrc === 'manual' ? 'mut' : 'alc'}">${s.pageSizeSrc === 'detected' ? '✓ matches TIPS' : s.pageSizeSrc === 'manual' ? 'set manually' : 'not detected yet'}</span><input class="s" type="number" id="s_ps" value="${s.pageSize}" min="1" max="500"></span></label>
       <label class="fld">Outlet <input type="text" id="s_outlet" value="${esc(s.outlet)}"></label>
       <label class="fld">User <input type="text" id="s_user" value="${esc(s.user)}"></label>
       <label class="fld">Reader version <input type="text" id="s_ver" value="${esc(s.ver)}"></label>
-      <div class="lbl" style="margin-top:4px">Data files to include <span class="mut" style="text-transform:none;letter-spacing:0;font-weight:400">– PDFs and attachments are always saved</span></div>
-      <div class="fgrid">
-        <label class="ck"><input type="checkbox" id="f_docJson" ${s.files.docJson ? 'checked' : ''}> Document data <code>.json</code></label>
-        <label class="ck"><input type="checkbox" id="f_histCsv" ${s.files.histCsv ? 'checked' : ''}> Revision history <code>.csv</code></label>
-        <label class="ck"><input type="checkbox" id="f_histJson" ${s.files.histJson ? 'checked' : ''}> Revision history <code>.json</code></label>
-        <label class="ck"><input type="checkbox" id="f_attCsv" ${s.files.attCsv ? 'checked' : ''}> Links list <code>.csv</code></label>
-        <label class="ck"><input type="checkbox" id="f_manifest" ${s.files.manifest ? 'checked' : ''}> Manifest <code>.csv</code></label>
-        <label class="ck" title="Always included – needed to resume"><input type="checkbox" checked disabled> Progress log <code>.csv</code></label>
-      </div>
-      <div class="row"><button class="btn sm" id="f_all">All</button><button class="btn sm" id="f_csv">CSV only</button><button class="btn sm" id="f_json">JSON only</button><button class="btn sm" id="f_none">None</button></div>
-      ${!s.files.attCsv ? '<div class="mut warn">Links to other LIs are only recorded in the attachments &amp; links CSV.</div>' : ''}
-      <div class="row"><button class="btn sm" id="s_save" style="background:var(--acc);border-color:var(--acc);color:var(--ink);font-weight:600">Save</button><button class="btn sm" id="s_detect">Re-detect session</button><button class="btn sm" id="s_pos">Reset panel position</button></div>
-    </section>`;
+      <div class="sec" style="padding-top:12px;border-top:1px solid var(--div)"><b>Data files to include</b><span class="mut">PDFs and attachments are always saved.</span>
+        <div class="fgrid">
+          <label class="ck"><input type="checkbox" id="f_docJson" ${s.files.docJson ? 'checked' : ''}> Document data <code>.json</code></label>
+          <label class="ck"><input type="checkbox" id="f_histCsv" ${s.files.histCsv ? 'checked' : ''}> Revision history <code>.csv</code></label>
+          <label class="ck"><input type="checkbox" id="f_histJson" ${s.files.histJson ? 'checked' : ''}> Revision history <code>.json</code></label>
+          <label class="ck"><input type="checkbox" id="f_attCsv" ${s.files.attCsv ? 'checked' : ''}> Links list <code>.csv</code></label>
+          <label class="ck"><input type="checkbox" id="f_manifest" ${s.files.manifest ? 'checked' : ''}> Manifest <code>.csv</code></label>
+          <label class="ck" title="Always included – needed to resume"><input type="checkbox" checked disabled> Progress log <code>.csv</code></label>
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="b bar sm" id="f_all">All</button><button class="b bar sm" id="f_csv">CSV only</button><button class="b bar sm" id="f_json">JSON only</button><button class="b bar sm" id="f_none">None</button></div>
+        ${!s.files.attCsv ? '<span class="alc sm">Links to other LIs are only recorded in the links list CSV.</span>' : ''}
+      </div>`;
+    return { body, actions: '<button class="b bar" id="s_detect">Re-detect session</button><button class="b pri" id="s_save">Save</button>' };
   }
 
   function render() {
-    if (!visible) {
-      const run = S.run && S.run.kind === 'single' ? S.run : null, flash = fabFlash && Date.now() < fabFlash.until ? fabFlash : null;
-      const cur = run && run.items[run.results.length];
-      const inner = run ? `<span class="spin acc">${svg('<path d="M12 3a9 9 0 1 0 9 9"></path>', 16, 2.4)}</span>${cur ? esc(cur.tips) + ' · ' : ''}<span class="lab" id="plabel">${esc(runLabel(run))}</span>`
-        : flash ? `<span class="ok">${svg('<path d="M20 6L9 17l-5-5"></path>', 16, 2.6)}</span><span class="lab">${esc(flash.text)}</span>`
-        : '<span class="mark"></span>TIPS EXPORTER';
-      root.innerHTML = `<style>${css}</style><div class="fab" id="open" title="Click to open · drag to move">${inner}</div>`;
-      const fab = root.getElementById('open');
-      fab.onpointerdown = e => startDrag(e, fab, () => { visible = true; render(); });
-      placeHost(); syncToolbar(); return;
-    }
-    // keep typing focus across re-renders
+    syncRail();
+    if (!visible) { root.innerHTML = ''; syncToolbar(); return; }
+    // keep typing focus and scroll position across re-renders
     const ae = root.activeElement, focusLi = ae && ae.id === 'li', selA = focusLi ? ae.selectionStart : 0, selB = focusLi ? ae.selectionEnd : 0;
-    const oldPanel = root.querySelector('.panel'), scroll = oldPanel && lastView === view ? oldPanel.scrollTop : 0; lastView = view;
-    const s = S.settings, run = S.run;
-    const status = run ? (run.kind === 'single' ? '<span class="acc">● Downloading</span>' : run.paused ? `<span class="warn">● ${esc(run.title)} paused</span>` : `<span class="acc">● ${esc(run.title)} running</span>`)
-      : S.pending ? '<span class="ok">● Awaiting approval</span>' : view === 'single' && S.single && S.single.phase === 'done' ? '<span class="ok">● Saved</span>' : '';
-    root.innerHTML = `<style>${css}</style><div class="panel">
-      <header id="hdr" title="Drag to move · double-click to reset position">
-        <div class="brand"><span class="mark"></span><b>TIPS EXPORTER</b><span class="status">${status}</span></div>
-        <div class="row" style="gap:0;flex-wrap:nowrap"><button class="ib" id="gear" aria-label="Settings" aria-pressed="${showSettings}">${I.gear}</button><button class="ib" id="min" aria-label="Minimise panel">${I.min}</button></div>
-      </header>
-      ${S.msg ? `<div class="note" role="status"><span>${esc(S.msg)}</span><button id="msgx" aria-label="Dismiss message">×</button></div>` : ''}
-      ${showSettings ? vSettings() : ''}
-      ${view === 'bulk' ? vBulk() : vSingle()}
-      <footer>${sessionOK() ? `<span class="dot" style="background:var(--ok)"></span><span>Session OK · ${esc(s.user)} · outlet ${esc(s.outlet)} · Reader v${esc(s.ver)}</span>`
-        : '<span class="dot" style="background:var(--warn)"></span><span>Session not detected – open any topic once, or set it in ⚙</span>'}</footer>
-    </div>`;
+    const oldBody = root.querySelector('.body'), scroll = oldBody && lastView === view ? oldBody.scrollTop : 0; lastView = view;
+    const s = S.settings, run = S.run, T = topOffset();
+    const status = run ? (run.kind === 'single' ? '<span class="st acc">● Downloading</span>' : run.paused ? `<span class="st alc">● ${esc(run.title)} paused</span>` : `<span class="st acc">● ${esc(run.title)} running</span>`)
+      : S.pending ? '<span class="st okc">● Awaiting approval</span>' : view === 'single' && S.single && S.single.phase === 'done' ? '<span class="st okc">● Saved</span>' : '';
+    const v = showSettings ? vSettings() : view === 'bulk' ? vBulk() : vSingle();
+    root.innerHTML = `<style>${css}</style><div class="dim" id="dim" style="top:${T}px"></div>
+      <aside class="dr${justOpened ? ' anim' : ''}" role="dialog" aria-label="TIPS Exporter" style="top:${T}px">
+        <div class="hd"><div class="ttl"><h2>TIPS Exporter</h2>${status}</div>
+          <div class="hb"><button class="ib" id="gear" aria-label="Settings" aria-pressed="${showSettings}">${svg('<circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>', 22, 1.5)}</button>
+            <span class="sep"></span><button class="ib" id="close" aria-label="Close">${svg('<path d="M18 6L6 18"></path><path d="M6 6l12 12"></path>', 22, 1.5)}</button></div></div>
+        <div class="tabs" role="tablist"><button class="tab" role="tab" id="tosingle" aria-selected="${view === 'single'}">Single LI</button><button class="tab" role="tab" id="tobulk" aria-selected="${view === 'bulk'}">Bulk export</button></div>
+        ${S.msg ? `<div class="note" role="status"><span>${esc(S.msg)}</span><button id="msgx" aria-label="Dismiss message">×</button></div>` : ''}
+        <div class="body" id="body">${v.body}</div>
+        <div class="ft"><span class="sess">${sessionOK() ? `<span class="okc" style="display:flex">${svg('<path d="M20 6L9 17l-5-5"></path>', 16, 2.4)}</span>Session OK · ${esc(s.user)}` : `<span class="alc" style="display:flex">${svg('<path d="M12 9v4"></path><path d="M12 17h.01"></path><path d="M10.3 3.9L1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"></path>', 16, 2)}</span>Session not detected – open any topic once, or check ⚙`}</span>
+          <div class="acts">${v.actions}</div></div>
+      </aside>`;
+    justOpened = false;
     const $ = id => root.getElementById(id);
     const on = (id, ev, fn) => { const el = $(id); if (el) el[ev] = fn; };
     const safeRun = fn => async () => { try { await fn(); } catch (e) { S.run = null; setMsg((e instanceof SessionError ? '⚠ ' : 'Error: ') + e.message); } };
     const focusBox = () => { const t = $('li'); if (t) { t.focus(); t.selectionStart = t.selectionEnd = t.value.length; } };
-    const hdr = $('hdr');
-    hdr.onpointerdown = e => startDrag(e, hdr);
-    hdr.ondblclick = e => { if (!e.target.closest('button')) { S.settings.pos = null; saveSettings(); placeHost(); } };
-    on('min', 'onclick', () => { visible = false; render(); });
+    on('dim', 'onclick', () => openDrawer(false));
+    on('close', 'onclick', () => openDrawer(false));
     on('gear', 'onclick', () => { showSettings = !showSettings; sDraft = {}; render(); });
     on('msgx', 'onclick', () => { S.msg = ''; render(); });
+    on('tobulk', 'onclick', () => { view = 'bulk'; showSettings = false; render(); });
+    on('tosingle', 'onclick', () => { view = 'single'; showSettings = false; render(); });
 
     // single LI
     const lookup = safeRun(() => lookupSpecific(liText));
@@ -832,10 +775,8 @@
     on('newdl', 'onclick', () => { liText = ''; S.single = null; render(); focusBox(); });
     on('fix', 'onclick', () => { liText = S.single.problems.map(p => p.token).join('\n'); S.single = null; render(); focusBox(); });
     root.querySelectorAll('[data-redo]').forEach(b => b.onclick = () => { const r = S.recent[+b.dataset.redo]; if (!r) return; liText = r.tips.join('\n'); S.single = null; lookup(); });
-    on('tobulk', 'onclick', () => { view = 'bulk'; render(); });
-    on('tosingle', 'onclick', () => { view = 'single'; render(); });
 
-    // run controls (both views)
+    // run controls
     on('pause', 'onclick', () => { S.run.paused = !S.run.paused; render(); });
     on('cancel', 'onclick', cancelRun);
 
@@ -882,25 +823,72 @@
       notePageSize(+document.documentElement.dataset.tipsxPageSize);
       sDraft = {}; await saveSettings(); render();
     });
-    on('s_pos', 'onclick', async () => { s.pos = null; await saveSettings(); placeHost(); });
 
     if (focusLi && $('li') && !$('li').disabled) { $('li').focus(); $('li').setSelectionRange(selA, selB); }
     if (showSettings) for (const id of S_FIELDS) { const el = $(id); if (!el) continue; if (id in sDraft) el.value = sDraft[id]; el.addEventListener('input', () => { sDraft[id] = el.value; }); }
-    root.querySelector('.panel').scrollTop = scroll;
-    placeHost(); syncToolbar();
+    root.querySelector('.body').scrollTop = scroll;
+    syncToolbar();
   }
   const cancelRun = () => { if (S.run) { S.run.cancel = true; S.run.paused = false; } };
   function renderRunBox() {
     const box = visible && root.getElementById('runbox');
-    if (!visible) render();                      // minimised button shows the step
-    else if (box && S.run) { box.innerHTML = vSingleRun(S.run); const c = root.getElementById('cancel'); if (c) c.onclick = cancelRun; }
+    if (box && S.run) { box.innerHTML = vSingleRun(S.run); }
     else renderProgress();
-    syncToolbar();
+    syncRail(); syncToolbar();
   }
   function renderProgress() {
     const bar = root.getElementById('pbar'), lab = root.getElementById('plabel');
     if (bar && S.run && S.run.kind === 'bulk') bar.style.width = (100 * (S.run.i - 1) / S.run.total).toFixed(1) + '%';
     if (lab && S.run) lab.textContent = runLabel(S.run);
+    syncRail();
+  }
+
+  // ---------------------------------------------------------------- Reader ⋮ menu entry + status badge on the ⋮ button
+  // The menu (nav#auxMenu0-panel) is a CDK overlay rebuilt on every open; our item is re-added each time.
+  const MENU_ICON = '<path d="M12 3v12"></path><path d="M7 10l5 5 5-5"></path><path d="M5 21h14"></path>';
+  function menuStatus() {
+    if (S.run && S.run.kind === 'single') return `${Math.min(S.run.results.length + 1, S.run.total)} of ${S.run.total}…`;
+    if (S.run) return `${S.run.title} · ${S.run.i}/${S.run.total}`;
+    if (S.pending) return 'Ready to approve';
+    if (Date.now() < railFlash) return '✓ Saved';
+    return '';
+  }
+  function closeAuxMenu() {
+    document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true, cancelable: true }));
+    setTimeout(() => {   // fallback: toggle the trigger if the overlay ignored the synthetic Escape
+      if (document.getElementById('auxMenu0-panel')) { const t = document.querySelector('#auxMenu0 button.xy-test-standard-trigger, #auxMenu0 button'); if (t) t.click(); }
+    }, 60);
+  }
+  function injectMenu() {
+    const nav = document.getElementById('auxMenu0-panel') || document.querySelector('nav.xy-c-aux-menu');
+    if (!nav || nav.querySelector('.tipsx-menuitem')) return false;
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'xy-base-button xy-themed-state-transparent-primary xy-i-md xy-nowrap xy-position-relative tipsx-menuitem';
+    b.setAttribute('role', 'menuitem');
+    b.innerHTML = `<span class="tipsx-mi-ic">${pageSvg(MENU_ICON, 24)}</span><span>TIPS Exporter</span><span class="tipsx-mi-st">${esc(menuStatus())}</span>`;
+    b.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); closeAuxMenu(); openDrawer(true); });
+    const after = nav.querySelector('button.xy-i-cog'), before = nav.querySelector('button.xy-i-sign-out');
+    if (after) after.after(b); else if (before) before.before(b); else nav.appendChild(b);
+    return true;
+  }
+  function syncRail() {
+    const aux = document.getElementById('auxMenu0') || document.querySelector('footer xy-c-aux-menu');
+    const kind = !visible && S.run ? 'busy' : !visible && S.pending ? 'wait' : Date.now() < railFlash ? 'done' : '';
+    if (aux) {
+      let bd = aux.querySelector(':scope > .tipsx-rbadge');
+      if (!kind) { if (bd) bd.remove(); }
+      else {
+        if (!bd) { bd = document.createElement('span'); bd.className = 'tipsx-rbadge'; if (getComputedStyle(aux).position === 'static') aux.style.position = 'relative'; aux.appendChild(bd); }
+        if (bd.dataset.kind !== kind) {
+          bd.dataset.kind = kind;
+          bd.innerHTML = kind === 'done' ? pageSvg('<path d="M20 6L9 17l-5-5"></path>', 12) : kind === 'wait' ? '!' : pageSvg(MENU_ICON, 12);
+          bd.title = kind === 'done' ? 'TIPS Exporter: saved' : kind === 'wait' ? 'TIPS Exporter: batch ready to approve' : 'TIPS Exporter: downloading';
+        }
+      }
+    }
+    const st = document.querySelector('.tipsx-menuitem .tipsx-mi-st');
+    if (st) { const t = menuStatus(); if (st.textContent !== t) st.textContent = t; }
   }
 
   // ---------------------------------------------------------------- TIPS topic toolbar: "download this topic" button
@@ -918,7 +906,13 @@
   .tipsx-spin{animation:tipsx-spin .9s linear infinite;transform-origin:50% 50%} @keyframes tipsx-spin{to{transform:rotate(360deg)}}
   .tipsx-tip{position:absolute;top:calc(100% + 6px);right:0;z-index:100000;width:max-content;max-width:280px;padding:8px 10px;background:#222;color:#fff;font:12px/1.4 "Segoe UI",Arial,sans-serif;text-align:left;white-space:normal;pointer-events:none;opacity:0;transition:opacity .12s .2s}
   .tipsx-dlwrap:hover .tipsx-tip,.tipsx-dl:focus-visible+.tipsx-tip,.tipsx-dlwrap[data-show] .tipsx-tip{opacity:1}
-  .tipsx-tip small{display:block;margin-top:2px;color:#bbb;font-size:11px}`;
+  .tipsx-tip small{display:block;margin-top:2px;color:#bbb;font-size:11px}
+  .tipsx-menuitem{display:flex;align-items:center;gap:8px;text-align:left}
+  .tipsx-mi-ic{display:inline-flex;width:24px;height:24px;align-items:center;justify-content:center;flex:none}
+  .tipsx-mi-st{margin-left:auto;padding-left:16px;font-size:12px;color:#006EFF}
+  .tipsx-rbadge{position:absolute;top:4px;right:4px;min-width:18px;height:18px;padding:0 4px;box-sizing:border-box;border-radius:9px;display:flex;align-items:center;justify-content:center;
+    background:#006EFF;color:#fff;font:700 11px/1 Arial,sans-serif;pointer-events:none;z-index:1}
+  .tipsx-rbadge[data-kind=done]{background:#018601}`;
   const pageSvg = (d, n) => `<svg width="${n}" height="${n}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${d}</svg>`;
   const TB_ICON = {
     idle: '<path d="M12 3v12"></path><path d="M7 10l5 5 5-5"></path><path d="M5 21h14"></path>',
@@ -990,7 +984,6 @@
       if (S.single && S.single.phase === 'done') {
         const m = S.single.sum, fname = S.single.fname;
         settle('done', `Saved ${fname} (${m.sizeMB} MB)${m.errors.length ? ` – ${m.errors.length} file(s) could not be saved, see _errors.txt in the zip` : ''}`, 5000);
-        fabFlash = { text: `Saved ${fname}`, until: Date.now() + 6000 }; setTimeout(render, 6100);
         if (keep) restore();
       } else { restore(); settle('error', S.msg !== msg0 && S.msg ? S.msg : 'Download stopped – nothing saved.', 6000); }
     } catch (e) { S.single = null; restore(); settle('error', e.message, 6000); }
@@ -1020,17 +1013,18 @@
       wrap.addEventListener('mouseenter', syncToolbar);
       added = true;
     }
-    if (added) syncToolbar();
+    if (injectMenu()) added = true;
+    if (added) { syncToolbar(); syncRail(); }
   }
   let injectQueued = false;
   new MutationObserver(muts => {
-    if (injectQueued || muts.every(m => m.target.closest && m.target.closest('.tipsx-dlwrap'))) return;   // ignore our own button updates
+    if (injectQueued || muts.every(m => m.target.closest && m.target.closest('.tipsx-dlwrap, .tipsx-rbadge, .tipsx-menuitem'))) return;   // ignore our own updates
     injectQueued = true; requestAnimationFrame(injectToolbar);
   }).observe(document.documentElement, { childList: true, subtree: true });
 
   window.addEventListener('beforeunload', e => { if (S.run || S.pending) { e.preventDefault(); e.returnValue = ''; } });
   if (hasChrome && chrome.runtime && chrome.runtime.onMessage) {
-    chrome.runtime.onMessage.addListener((m, _s, reply) => { if (m && m.type === 'toggle') { visible = !visible; render(); } reply && reply(true); });
+    chrome.runtime.onMessage.addListener((m, _s, reply) => { if (m && m.type === 'toggle') openDrawer(!visible); reply && reply(true); });
   }
 
   if (!hasChrome) window.__TIPSX_DEBUG = { S, importLog, prepareBatch, approve, discard, render, progressCsv, nextBatch, lookupSpecific, downloadFound, downloadOpenTopic };
