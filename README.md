@@ -1,6 +1,6 @@
 # TIPS Exporter (Chrome extension)
 
-This extension batch-exports XENTRY TIPS Reader topics. It runs inside your logged-in Chrome tab, so it never handles your password or sign-in. For each document it saves the current PDF, the raw data, attachments and links, the revision history, and a PDF of every prior version. Each batch becomes one zip, and nothing downloads until you approve the batch.
+This extension downloads XENTRY TIPS Reader topics, either the specific LI documents you ask for or the whole catalogue in batches. It runs inside your logged-in Chrome tab, so it never handles your password or sign-in. For each document it saves the current PDF, the raw data, attachments and links, the revision history, and a PDF of every prior version. Bulk batches become one zip each, and nothing downloads until you approve the batch.
 
 ## Install (one time)
 
@@ -11,21 +11,34 @@ This extension batch-exports XENTRY TIPS Reader topics. It runs inside your logg
 
 ## Continue where you left off (batches 1–3 already done)
 
-1. Log into XENTRY and open **TIPS Reader**. A **⬇ TIPS Exporter** button appears in the bottom-right corner. Clicking the toolbar icon also shows or hides the panel.
-2. Check the **Session** line. It should show your user, outlet and Reader version. If it shows ✗, open any topic once and click **⚙ → Re-detect**, or type the values in.
-3. Click **Import log…** and select `_progress_log_all_documents.csv` from inside your newest zip (`TIPS_LI_Batch_003_of_139.zip`). The panel should show 3,469 topics, 75 exported, and next batch 4.
-4. Optional: click **Check for new/updated**. New topics are added at the end, so earlier batch numbers never shift. Topics that got a newer version go back in the queue.
+1. Log into XENTRY and open **TIPS Reader**. A **TIPS EXPORTER** button appears in the bottom-right corner. Click it (or the toolbar icon) to open the panel.
+2. Check the session line at the bottom of the panel. It should show your user, outlet and Reader version. If it says the session isn't detected, open any topic once and click **⚙ → Re-detect session**, or type the values in.
+3. The panel opens on **Download LI documents**. Click the **Bulk export** row at the bottom, then **Import log** and select `_progress_log_all_documents.csv` from inside your newest zip (`TIPS_LI_Batch_003_of_139.zip`). The panel should show 3,469 topics, 75 exported, and next batch 4.
+4. Optional: click **Check new**. New topics are added at the end, so earlier batch numbers never shift. Topics that got a newer version go back in the queue.
 5. Click **Prepare batch 4**. When it's ready, review the summary (size, attachments, prior versions, errors), then click **Approve & download** or **Discard**.
 
 ## Moving the panel
 
-Drag the black title bar (or the minimised **⬇ TIPS Exporter** button) anywhere on screen; the position is remembered. Double-click the title bar, or use **⚙ → Reset panel position**, to put it back in the bottom-right corner.
+Drag the title bar (or the minimised **TIPS EXPORTER** button) anywhere on screen; the position is remembered. Double-click the title bar, or use **⚙ → Reset panel position**, to put it back in the bottom-right corner.
 
 ## Download a specific LI
 
-Type one or more numbers in **Download specific LI**, e.g. `LI42.10-P-078779` (separate several with spaces, commas or new lines), then click **Download with revisions, attachments & links** (or Ctrl+Enter). Once the index is built, a unique fragment such as `078779` also works. The current version is always looked up live in TIPS. The download is saved immediately as `TIPS_LI42.10-P-078779.zip` (or `TIPS_selection_<date>_<n>docs.zip` for several) with the same folder layout as the batches: current PDF, JSON, Attachments and Links, and Revision History with every prior version. Single-LI downloads don't change bulk-export progress.
+This is the panel's main screen.
+
+1. Type one or more numbers in **Download LI documents**, e.g. `LI42.10-P-078779`. Separate several with spaces, commas or new lines. Once the index is built, a unique ending such as `078779` also works.
+2. Click **Look up** (or press Ctrl+Enter). Each entry is checked live in TIPS, so you always get the current version. The panel lists what it found, with the version and how many prior versions it has, and explains any entry it couldn't use (for example, a fragment that matches several topics). Editing the box clears the list so you can look up again.
+3. Click **Download N**. The progress shows each document and the step it's on (topic data and PDF, attachments, prior versions). **Cancel download** saves nothing.
+4. The zip is saved straight to your Downloads folder as `TIPS_LI42.10-P-078779.zip`, or `TIPS_selection_<date>_<n>docs.zip` for several. It has the same folder layout as the batches: current PDF, JSON, Attachments and Links, and Revision History with every prior version. Skipped entries are listed and also written to `_errors.txt` in the zip; **Fix** puts them back in the box.
+
+### From the topic itself
+
+When you open a topic in TIPS, a download button (with a small blue dot) appears in the topic's toolbar, next to **Print**. Hover over it to see what you'll get, e.g. "Download LI42.10-P-078779 with all 5 prior versions, attachments and links". Click it to download straight away: no typing, no lookup step. The button spins while it works and then shows a green tick, and the minimised **TIPS EXPORTER** button shows the progress and then "Saved …". The zip is the same as a download from the panel. If TIPS changes its layout and the button stops appearing, use the panel as usual.
+
+**Recent downloads** keeps your last 10 downloads in this browser. The ↻ button looks the same documents up again. Single-LI downloads never change bulk-export progress.
 
 ## Controls
+
+Bulk export has its own screen: click the **Bulk export** row at the bottom of the panel, and **Single LI** to go back. While a batch is running or waiting for approval, single-LI downloads are locked.
 
 | Control | What it does |
 |---|---|
@@ -33,10 +46,11 @@ Type one or more numbers in **Download specific LI**, e.g. `LI42.10-P-078779` (s
 | Pause / Resume / Cancel | Stops between documents. Cancel discards the partial batch. |
 | Approve & download | Saves the zip to your Downloads folder and marks those documents as exported. |
 | Discard | Throws away the prepared zip. Its documents stay pending. |
-| After download, start preparing the next batch | On by default. You still approve each batch. |
+| Auto-continue | On by default: after each download, the next batch starts preparing. You still approve each batch. |
 | Auto-approve | Off by default. When on, every batch downloads without asking. |
-| Check for new/updated | Adds new topics at the end and re-queues topics that have a newer version. |
-| Import log… / Save log CSV | Restores progress from a CSV, or saves the current progress to one. The log is also included in every zip. |
+| Check new | Adds new topics at the end and re-queues topics that have a newer version. |
+| Rebuild / Build index | Builds the list of all topics from TIPS. Rebuilding re-sorts everything and can shift batch numbers, so use **Check new** instead unless you're starting over. |
+| Import log / Save log | Restores progress from a CSV, or saves the current progress to one. The log is also included in every zip. |
 | ⚙ Settings | Batch size (1–500, can be changed any time), delay between documents (a random time within a range, 2–5 seconds by default), search page size, outlet, user, Reader version, which data files to include, and reset panel position. |
 
 Progress is tracked per document, not per batch. Changing the batch size never skips or repeats anything; the next batch is simply the next *N* pending documents. Zips from now on are named `TIPS_LI_Batch_NNN.zip`.
@@ -45,7 +59,7 @@ Progress is tracked per document, not per batch. Changing the batch size never s
 
 ## Request pacing
 
-- **Index search.** **Build index** and **Check for new/updated** run one search pass, oldest topics first, using the same page size as the Reader's own search. The exporter learns that page size by watching the Reader's searches in the tab, so run any search in TIPS first. Until it has seen one, it asks before falling back to 50 per page. The page size and where it came from are shown under **⚙**. If you type a size in yourself, it is kept until you click **Re-detect session**.
+- **Index search.** **Build index** and **Check new** run one search pass, oldest topics first, using the same page size as the Reader's own search. The exporter learns that page size by watching the Reader's searches in the tab, so run any search in TIPS first. Until it has seen one, it asks before falling back to 50 per page. The page size and where it came from are shown under **⚙**. If you type a size in yourself, it is kept until you click **Re-detect session**.
 - **Between documents.** The exporter waits a random time within the range set under **⚙** (2–5 seconds by default) before each document after the first. The progress line counts the wait down, and Pause and Cancel work during it. A batch of 25 takes about 1½ minutes longer than with the old fixed 0.25 s delay.
 
 ## What's inside each zip
@@ -66,7 +80,7 @@ Under **⚙ → Data files to include** you can switch each data file on or off:
 
 ## Where progress is stored
 
-Progress is stored in the extension's own storage (`chrome.storage.local`), so clearing XENTRY's site data doesn't erase it. If you move to another PC or reinstall the extension, use **Import log…** with the newest zip's CSV.
+Progress is stored in the extension's own storage (`chrome.storage.local`), so clearing XENTRY's site data doesn't erase it. If you move to another PC or reinstall the extension, use **Import log** (Bulk export screen) with the newest zip's CSV.
 
 ## Troubleshooting
 

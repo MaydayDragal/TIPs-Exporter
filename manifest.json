@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "TIPS Exporter",
-  "version": "1.3.0",
-  "description": "Batch-export XENTRY TIPS Reader topics (current PDF, attachments, links, revision history and prior versions) to zips, with per-batch approval and a resumable log.",
+  "version": "1.5.0",
+  "description": "Download XENTRY TIPS Reader topics – specific LIs or batch-export (current PDF, attachments, links, revision history and prior versions) to zips, with per-batch approval and a resumable log.",
   "permissions": ["storage", "unlimitedStorage", "scripting"],
   "host_permissions": ["https://xentry.mercedes-benz.com/*"],
   "background": { "service_worker": "background.js" },
