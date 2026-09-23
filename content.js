@@ -28,13 +28,14 @@
     index: [],          // frozen list [{tips,tipsId,version,title,mdate}]
     done: {},           // tipsId -> {b: batch, d: iso date, v: version}
     history: [],        // [{n, fname, sizeMB, docs, ok, att, prev, errors, date}]
-    settings: { outlet: '', user: '', ver: '', batchSize: 25, delayMs: 250, autoApprove: false, autoContinue: true,
+    settings: { outlet: '', user: '', ver: '', batchSize: 25, delayMs: 2000, delayMaxMs: 5000, pageSize: 50, pageSizeSrc: 'default',
+      autoApprove: false, autoContinue: true,
       files: { docJson: true, attCsv: true, histCsv: true, histJson: true, manifest: true } },
     run: null,          // {n, i, total, label, paused, cancel}
     pending: null,      // prepared batch awaiting approval {n, blob, fname, summary, results}
     msg: ''
   };
-  const DEFAULT_SEARCH = { fuzzyActive: true, correlationId: 4, fallbackLang: 'en', area: 'WS', creator: null, sortorder: { field: 'mdate', order: 'desc' }, lang: { lang: 'en' }, countries: ['US'], vehicleContext: {}, timefilter: {}, docName: '', workstate: '', brandNames: ['Maybach', 'Mercedes-Benz'], productGroupNames: ['PKW', 'Supersportwagen'], pagination: { pageNumber: 1, pageSize: 500 }, drilldowns: [{ key: 'country', identifier: 'US' }], favFilterActive: false, searchField: 'all', provideNavigation: 'full', totalHitsCountOnly: false, useAi: false };
+  const DEFAULT_SEARCH = { fuzzyActive: true, correlationId: 4, fallbackLang: 'en', area: 'WS', creator: null, sortorder: { field: 'mdate', order: 'desc' }, lang: { lang: 'en' }, countries: ['US'], vehicleContext: {}, timefilter: {}, docName: '', workstate: '', brandNames: ['Maybach', 'Mercedes-Benz'], productGroupNames: ['PKW', 'Supersportwagen'], pagination: { pageNumber: 1, pageSize: 50 }, drilldowns: [{ key: 'country', identifier: 'US' }], favFilterActive: false, searchField: 'all', provideNavigation: 'full', totalHitsCountOnly: false, useAi: false };
 
   async function load() {
     S.index = await store.get('index', []);
@@ -42,7 +43,11 @@
     S.history = await store.get('history', []);
     const saved = await store.get('settings', {});
     S.settings = { ...S.settings, ...saved, files: { ...S.settings.files, ...(saved.files || {}) } };
+    if (saved.delayMaxMs === undefined) {   // pre-1.3 settings had one fixed delay (default 250 ms)
+      S.settings.delayMs = Math.max(+saved.delayMs || 0, 2000); S.settings.delayMaxMs = S.settings.delayMs + 3000;
+    }
     detectSession();
+    notePageSize(+document.documentElement.dataset.tipsxPageSize);
   }
   const saveIndex = () => store.set('index', S.index);
   const saveDone = () => store.set('done', S.done);
@@ -65,6 +70,17 @@
     if (m) s.ver = m[1];
     if (!s.ver) s.ver = '1.22.0';
   }
+  // Page size the Reader itself uses for topic search, reported by pagesize-probe.js (runs in the page's world).
+  function notePageSize(n) {
+    const s = S.settings;
+    if (!Number.isInteger(n) || n < 1 || s.pageSizeSrc === 'manual' || (s.pageSize === n && s.pageSizeSrc === 'detected')) return false;
+    s.pageSize = n; s.pageSizeSrc = 'detected';
+    return true;
+  }
+  window.addEventListener('message', e => {
+    if (e.source !== window || !e.data || e.data.__tipsx !== 'pageSize') return;
+    if (notePageSize(e.data.size)) { saveSettings(); if (visible) render(); }
+  });
   async function detectUserFallback() {
     if (S.settings.user) return;
     try {
@@ -80,6 +96,7 @@
 
   // ---------------------------------------------------------------- helpers
   const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const randDelay = () => { const lo = S.settings.delayMs, hi = Math.max(lo, S.settings.delayMaxMs); return lo + Math.random() * (hi - lo); };
   const enc = new TextEncoder();
   const txt = s => enc.encode(s);
   const crcT = (() => { const t = new Uint32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; } return t; })();
@@ -140,39 +157,44 @@
   }
 
   // ---------------------------------------------------------------- index
-  async function searchAll(sortorder) {
-    const out = []; let total = 0;
-    for (let p = 1; p <= 20; p++) {
-      const r = await fetch('/tips/topic-service/api/v1/topics/search?' + Q(), { method: 'POST', credentials: 'include', headers: H(), body: JSON.stringify({ ...DEFAULT_SEARCH, sortorder, pagination: { pageNumber: p, pageSize: 500 } }) });
+  // One pass, oldest-modified first, paged with the Reader's own page size. Oldest-first means a topic
+  // edited or added mid-run moves to the end (still reached) instead of shifting pages already read.
+  async function fetchAllTopics() {
+    const size = S.settings.pageSize, m = new Map(); let total = 0, hits = 0;
+    for (let p = 1; p <= 2000; p++) {
+      setMsg(`Searching TIPS… page ${p}${total ? ' of ' + Math.ceil(total / size) : ''}`);
+      const r = await fetch('/tips/topic-service/api/v1/topics/search?' + Q(), { method: 'POST', credentials: 'include', headers: H(), body: JSON.stringify({ ...DEFAULT_SEARCH, sortorder: { field: 'mdate', order: 'asc' }, pagination: { pageNumber: p, pageSize: size } }) });
       if (r.status === 401 || r.status === 403) throw new SessionError('Session expired (HTTP ' + r.status + ')');
       if (!r.ok) throw new Error('Search failed: HTTP ' + r.status);
       const j = await r.json(); total = j.totalHits;
       if (!j.hits || !j.hits.length) break;
-      for (const h of j.hits) out.push({ tips: h.tips, tipsId: h.tipsId, version: h.version, title: h.title, mdate: h.modificationDate });
-      if (p * 500 >= total) break;
+      hits += j.hits.length;
+      for (const h of j.hits) if (!m.has(h.tipsId)) m.set(h.tipsId, { tips: h.tips, tipsId: h.tipsId, version: h.version, title: h.title, mdate: h.modificationDate });
+      if (hits >= total) break;
       await sleep(300);
     }
-    return { out, total };
+    const short = hits < total ? ` ⚠ TIPS reported ${total} hits but only ${hits} came back – some topics may be missing; run "Check for new/updated" later to pick them up.` : '';
+    return { list: [...m.values()], total, short };
   }
-  async function fetchAllTopics() {
-    const m = new Map(); let total = 0;
-    for (const so of [{ field: 'mdate', order: 'desc' }, { field: 'mdate', order: 'asc' }]) {
-      const r = await searchAll(so); total = r.total;
-      for (const x of r.out) if (!m.has(x.tipsId)) m.set(x.tipsId, x);
-    }
-    return { list: [...m.values()], total };
+  // Before the Reader has run a search in this tab its page size is unknown; ask before using the fallback.
+  function pageSizeOK() {
+    const s = S.settings;
+    if (notePageSize(+document.documentElement.dataset.tipsxPageSize)) saveSettings();
+    return s.pageSizeSrc !== 'default' || confirm(`The Reader's own search page size hasn't been seen in this tab yet, so the exporter would page through results ${s.pageSize} at a time.\n\nTo match the Reader instead, click Cancel, run any search in TIPS, then try again.\n\nContinue with ${s.pageSize} per page?`);
   }
   async function buildIndex() {
     if (S.index.length && !confirm('An index already exists. Rebuilding re-sorts everything and can shift batch numbers. Use "Check for new/updated" instead unless you are starting over.\n\nRebuild anyway?')) return;
+    if (!pageSizeOK()) return;
     setMsg('Building index…');
-    const { list, total } = await fetchAllTopics();
+    const { list, total, short } = await fetchAllTopics();
     S.index = list.sort((a, b) => a.tips.localeCompare(b.tips));
     await saveIndex();
-    setMsg(`Index built: ${S.index.length} unique topics (${total} search hits), ${remainingBatches()} batches to go at ${S.settings.batchSize} per batch.`);
+    setMsg(`Index built: ${S.index.length} unique topics (${total} search hits), ${remainingBatches()} batches to go at ${S.settings.batchSize} per batch.` + short);
   }
   async function refreshIndex() {
+    if (!pageSizeOK()) return;
     setMsg('Checking for new or updated topics…');
-    const { list } = await fetchAllTopics();
+    const { list, short } = await fetchAllTopics();
     const byId = new Map(S.index.map(x => [x.tipsId, x]));
     let updated = 0, reexport = 0; const fresh = [];
     for (const x of list) {
@@ -186,7 +208,7 @@
     fresh.sort((a, b) => a.tips.localeCompare(b.tips));
     S.index = S.index.concat(fresh);
     await saveIndex(); await saveDone();
-    setMsg(`${fresh.length} new topic(s) appended at the end; ${updated} topic(s) have a newer version` + (reexport ? ` (${reexport} already-exported one(s) re-queued)` : '') + '.');
+    setMsg(`${fresh.length} new topic(s) appended at the end; ${updated} topic(s) have a newer version` + (reexport ? ` (${reexport} already-exported one(s) re-queued)` : '') + '.' + short);
   }
 
   // ---------------------------------------------------------------- log import/export
@@ -278,7 +300,14 @@
     render();
     const files = [], errors = [], results = [];
     try {
-      for (const it of items) {
+      for (const [k, it] of items.entries()) {
+        if (k) {
+          const until = Date.now() + randDelay();
+          while (Date.now() < until && !S.run.cancel) {
+            S.run.label = `waiting ${Math.ceil((until - Date.now()) / 1000)} s before next document`; renderProgress();
+            await sleep(Math.min(250, until - Date.now()));
+          }
+        }
         while (S.run.paused && !S.run.cancel) await sleep(400);
         if (S.run.cancel) throw new Error('cancelled');
         S.run.i++; S.run.label = it.tips; render();
@@ -289,7 +318,6 @@
           if (e instanceof SessionError) throw e;
           results.push({ ...it, status: 'FAILED: ' + e.message }); errors.push(`${it.tips}: ${e.message}`);
         }
-        await sleep(S.settings.delayMs);
       }
     } catch (e) {
       S.run = null;
@@ -492,7 +520,8 @@
       ${showSettings ? `<section>
         <h4>Settings</h4>
         <label>Batch size <input type="number" id="s_bs" value="${s.batchSize}" min="1" max="500" style="width:70px"> <span class="muted">documents per zip</span></label>
-        <label>Delay between docs (ms) <input type="number" id="s_delay" value="${s.delayMs}" min="0" step="50" style="width:70px"></label>
+        <label>Delay between docs: random <input type="number" id="s_delay" value="${s.delayMs}" min="0" step="250" style="width:70px"> to <input type="number" id="s_delay2" value="${s.delayMaxMs}" min="0" step="250" style="width:70px"> ms</label>
+        <label>Search page size <input type="number" id="s_ps" value="${s.pageSize}" min="1" max="500" style="width:70px"> <span class="muted">${s.pageSizeSrc === 'detected' ? '<span class="ok">✓</span> matches the Reader' : s.pageSizeSrc === 'manual' ? 'set manually' : '<span class="warn">not detected yet</span> – run any search in TIPS'}</span></label>
         <label>Outlet <input type="text" id="s_outlet" value="${esc(s.outlet)}"></label>
         <label>User <input type="text" id="s_user" value="${esc(s.user)}"></label>
         <label>Reader version <input type="text" id="s_ver" value="${esc(s.ver)}"></label>
@@ -556,7 +585,11 @@
       if (!(bs >= 1 && bs <= 500)) { setMsg('Batch size must be 1–500.'); return; }
       s.batchSize = bs;
       s.outlet = $('s_outlet').value.trim(); s.user = $('s_user').value.trim(); s.ver = $('s_ver').value.trim();
-      s.delayMs = Math.max(0, +$('s_delay').value || 0);
+      const ps = Math.round(+$('s_ps').value);
+      if (!(ps >= 1 && ps <= 500)) { setMsg('Search page size must be 1–500.'); return; }
+      if (ps !== s.pageSize) { s.pageSize = ps; s.pageSizeSrc = 'manual'; }
+      const d1 = Math.max(0, +$('s_delay').value || 0), d2 = Math.max(0, +$('s_delay2').value || 0);
+      s.delayMs = Math.min(d1, d2); s.delayMaxMs = Math.max(d1, d2);
       readFileBoxes();
       await saveSettings(); setMsg(`Settings saved. Batch size is now ${bs}.`);
     };
@@ -568,7 +601,12 @@
     if ($('f_csv')) $('f_csv').onclick = () => preset({ docJson: false, histCsv: true, histJson: false, attCsv: true, manifest: true });
     if ($('f_json')) $('f_json').onclick = () => preset({ docJson: true, histCsv: false, histJson: true, attCsv: false, manifest: false });
     if ($('f_none')) $('f_none').onclick = () => preset({ docJson: false, histCsv: false, histJson: false, attCsv: false, manifest: false });
-    if ($('s_detect')) $('s_detect').onclick = async () => { detectSession(); await detectUserFallback(); await saveSettings(); render(); };
+    if ($('s_detect')) $('s_detect').onclick = async () => {
+      detectSession(); await detectUserFallback();
+      if (s.pageSizeSrc === 'manual') s.pageSizeSrc = 'default';
+      notePageSize(+document.documentElement.dataset.tipsxPageSize);
+      await saveSettings(); render();
+    };
     if ($('s_pos')) $('s_pos').onclick = async () => { s.pos = null; await saveSettings(); placeHost(); };
     $('li').oninput = e => { liText = e.target.value; };
     $('li').onkeydown = e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) $('lidl').click(); };

@@ -37,11 +37,16 @@ Type one or more numbers in **Download specific LI**, e.g. `LI42.10-P-078779` (s
 | Auto-approve | Off by default. When on, every batch downloads without asking. |
 | Check for new/updated | Adds new topics at the end and re-queues topics that have a newer version. |
 | Import log… / Save log CSV | Restores progress from a CSV, or saves the current progress to one. The log is also included in every zip. |
-| ⚙ Settings | Batch size (1–500, can be changed any time), delay between documents, outlet, user, Reader version, which data files to include, and reset panel position. |
+| ⚙ Settings | Batch size (1–500, can be changed any time), delay between documents (a random time within a range, 2–5 seconds by default), search page size, outlet, user, Reader version, which data files to include, and reset panel position. |
 
 Progress is tracked per document, not per batch. Changing the batch size never skips or repeats anything; the next batch is simply the next *N* pending documents. Zips from now on are named `TIPS_LI_Batch_NNN.zip`.
 
 **Failed documents** stay *pending*, and the next Prepare picks them up again. **If your XENTRY session expires**, the batch stops with a warning. Log in again in the same tab, then click Prepare to retry the batch.
+
+## Request pacing
+
+- **Index search.** **Build index** and **Check for new/updated** run one search pass, oldest topics first, using the same page size as the Reader's own search. The exporter learns that page size by watching the Reader's searches in the tab, so run any search in TIPS first. Until it has seen one, it asks before falling back to 50 per page. The page size and where it came from are shown under **⚙**. If you type a size in yourself, it is kept until you click **Re-detect session**.
+- **Between documents.** The exporter waits a random time within the range set under **⚙** (2–5 seconds by default) before each document after the first. The progress line counts the wait down, and Pause and Cancel work during it. A batch of 25 takes about 1½ minutes longer than with the old fixed 0.25 s delay.
 
 ## What's inside each zip
 
