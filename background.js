@@ -11,6 +11,7 @@ chrome.action.onClicked.addListener(async (tab) => {
     await chrome.tabs.sendMessage(tab.id, { type: 'toggle' });
   } catch (e) {
     // Tab was open before the extension was installed/reloaded: inject, then toggle.
+    await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['pagesize-probe.js'], world: 'MAIN' });
     await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['content.js'] });
     await chrome.tabs.sendMessage(tab.id, { type: 'toggle' });
   }

@@ -39,6 +39,7 @@
   };
   const DEFAULT_SEARCH = { fuzzyActive: true, correlationId: 4, fallbackLang: 'en', area: 'WS', creator: null, sortorder: { field: 'mdate', order: 'desc' }, lang: { lang: 'en' }, countries: ['US'], vehicleContext: {}, timefilter: {}, docName: '', workstate: '', brandNames: ['Maybach', 'Mercedes-Benz'], productGroupNames: ['PKW', 'Supersportwagen'], pagination: { pageNumber: 1, pageSize: 50 }, drilldowns: [{ key: 'country', identifier: 'US' }], favFilterActive: false, searchField: 'all', provideNavigation: 'full', totalHitsCountOnly: false, useAi: false };
 
+  let loaded = false;   // settings read from storage; nothing may be saved before this
   async function load() {
     S.index = await store.get('index', []);
     S.done = await store.get('done', {});
@@ -51,6 +52,7 @@
     }
     detectSession();
     notePageSize(+document.documentElement.dataset.tipsxPageSize);
+    loaded = true;
   }
   const saveIndex = () => store.set('index', S.index);
   const saveDone = () => store.set('done', S.done);
@@ -82,7 +84,7 @@
     return true;
   }
   window.addEventListener('message', e => {
-    if (e.source !== window || !e.data || e.data.__tipsx !== 'pageSize') return;
+    if (e.source !== window || !e.data || e.data.__tipsx !== 'pageSize' || !loaded) return;   // before load(), load() reads the probe's value itself
     if (notePageSize(e.data.size)) { saveSettings(); if (visible) render(); }
   });
   async function detectUserFallback() {
@@ -163,22 +165,36 @@
   // ---------------------------------------------------------------- index
   // One pass, oldest-modified first, paged with the Reader's own page size. Oldest-first means a topic
   // edited or added mid-run moves to the end (still reached) instead of shifting pages already read.
-  async function fetchAllTopics() {
-    const size = S.settings.pageSize, m = new Map(); let total = 0, hits = 0;
+  async function searchPass(order, m, label) {
+    const size = S.settings.pageSize; let total = 0, hits = 0, changed = 0, done = false;
     for (let p = 1; p <= 2000; p++) {
-      setMsg(`Searching TIPS… page ${p}${total ? ' of ' + Math.ceil(total / size) : ''}`);
-      const r = await fetch('/tips/topic-service/api/v1/topics/search?' + Q(), { method: 'POST', credentials: 'include', headers: H(), body: JSON.stringify({ ...DEFAULT_SEARCH, sortorder: { field: 'mdate', order: 'asc' }, pagination: { pageNumber: p, pageSize: size } }) });
+      setMsg(`${label}… page ${p}${total ? ' of ' + Math.ceil(total / size) : ''}`);
+      const r = await fetch('/tips/topic-service/api/v1/topics/search?' + Q(), { method: 'POST', credentials: 'include', headers: H(), body: JSON.stringify({ ...DEFAULT_SEARCH, sortorder: { field: 'mdate', order }, pagination: { pageNumber: p, pageSize: size } }) });
       if (r.status === 401 || r.status === 403) throw new SessionError('Session expired (HTTP ' + r.status + ')');
-      if (!r.ok) throw new Error('Search failed: HTTP ' + r.status);
+      if (!r.ok) { if (p === 1) throw new Error('Search failed: HTTP ' + r.status); break; }   // past a paging limit: keep what we have
       const j = await r.json(); total = j.totalHits;
       if (!j.hits || !j.hits.length) break;
       hits += j.hits.length;
-      for (const h of j.hits) if (!m.has(h.tipsId)) m.set(h.tipsId, { tips: h.tips, tipsId: h.tipsId, version: h.version, title: h.title, mdate: h.modificationDate });
-      if (hits >= total) break;
+      for (const h of j.hits) {
+        const x = { tips: h.tips, tipsId: h.tipsId, version: h.version, title: h.title, mdate: h.modificationDate }, old = m.get(h.tipsId);
+        if (old && old.version !== x.version) changed++;   // edited while we were paging: pages may have shifted
+        if (!old || (x.mdate || 0) >= (old.mdate || 0)) m.set(h.tipsId, x);
+      }
+      if (hits >= total) { done = true; break; }
       await sleep(300);
     }
-    const short = hits < total ? ` ⚠ TIPS reported ${total} hits but only ${hits} came back – some topics may be missing; run "Check new" later to pick them up.` : '';
-    return { list: [...m.values()], total, short };
+    return { total, done, changed };
+  }
+  async function fetchAllTopics() {
+    const m = new Map();
+    const a = await searchPass('asc', m, 'Searching TIPS');
+    // Normally one pass. Only if it couldn't reach the end (TIPS stopped returning pages) search again from the newest end.
+    const b = a.done ? null : await searchPass('desc', m, 'Searching TIPS from the newest end');
+    const changed = a.changed + (b ? b.changed : 0);
+    let short = '';
+    if (!a.done && m.size < a.total) short += ` ⚠ TIPS reported ${a.total} hits but only ${m.size} topics could be read – TIPS may limit how far a search can be paged.`;
+    if (changed) short += ` ${changed} topic(s) changed during the search – run "Check new" to make sure none were skipped.`;
+    return { list: [...m.values()], total: a.total, short };
   }
   // Before the Reader has run a search in this tab its page size is unknown; ask before using the fallback.
   function pageSizeOK() {
@@ -320,7 +336,7 @@
           const r = await exportDoc(it, files, errors, (s, info) => {
             S.run.label = `${it.tips} – ${s}`; S.run.step = info || null;
             if (info && info.g === 'att') S.run.attN = info.n;
-            if (S.run.kind === 'single') render(); else renderProgress();
+            if (S.run.kind === 'single') renderRunBox(); else renderProgress();
           });
           results.push({ ...it, ...r, status: 'ok' });
         } catch (e) {
@@ -381,7 +397,7 @@
     S.pending = null;
     setMsg(`Downloaded ${p.fname}.`);
     render();
-    if (S.settings.autoContinue && nextBatch()) setTimeout(() => prepareBatch(), 800);
+    if (S.settings.autoContinue && nextBatch()) setTimeout(() => prepareBatch(), Math.max(800, randDelay()));
   }
   function discard() {
     if (!S.pending) return;
@@ -455,7 +471,9 @@
   host.style.cssText = 'position:fixed;z-index:2147483647;right:16px;bottom:16px;';
   const root = host.attachShadow({ mode: 'open' });
   let visible = false, showSettings = false, liText = '', view = 'single';   // view: 'single' | 'bulk'
-  let fabFlash = null;   // {text, until}: short status on the minimised button after a toolbar download
+  let fabFlash = null, lastView = 'single';
+  let sDraft = {};   // unsaved Settings edits, kept across re-renders until Save / close / Re-detect
+  const S_FIELDS = ['s_bs', 's_delay', 's_delay2', 's_ps', 's_outlet', 's_user', 's_ver'];   // {text, until}: short status on the minimised button after a toolbar download
   // Palette: navy fur, azure stripes, sky highlights, white belly, black legs.
   const css = `
   :host{all:initial;--bg:#0d1633;--line:#22346a;--row:#14214a;--inset:#0a1128;--edge:#2e4584;--btn2:#1a2a5c;--foot:#070c1c;
@@ -602,7 +620,7 @@
     const sg = S.single, run = S.run && S.run.kind === 'single' ? S.run : null;
     const blocked = !!(S.run || S.pending), F = S.settings.files;
     let h = '';
-    if (run) h += vSingleRun(run);
+    if (run) h += `<div id="runbox">${vSingleRun(run)}</div>`;
     else if (sg && sg.phase === 'done') h += vSingleDone(sg);
     else {
       const looking = sg && sg.phase === 'looking';
@@ -713,6 +731,8 @@
         <div class="item cur"><div class="body"><span class="mono">${esc((run.items[run.results.length] || {}).tips || '')}</span><span class="mut" id="plabel">${esc(runLabel(run))}</span></div></div>
         <div class="g11"><button class="btn" id="pause">${run.paused ? I.play + 'Resume' : I.pause + 'Pause'}</button><button class="btn bad" id="cancel">${I.x}Cancel</button></div>
         <div class="mut">Nothing downloads until you approve the batch. Cancel discards it; its documents stay pending.</div></section>`;
+    else if (S.run) h += `<section><div class="item cur"><div class="body"><span>A single-LI download is running</span><span class="mut" id="plabel">${esc(runLabel(S.run))}</span></div></div>
+        <button class="btn bad" id="cancel">${I.x}Cancel download</button></section>`;
     else if (pen) { const m = pen.summary; h += `<section style="padding-top:16px">
         <div><div class="lbl">Batch ${pen.n} ready</div><div class="mono" style="font-size:14px;margin-top:4px">${esc(m.fname)}</div></div>
         ${stats4([[m.sizeMB, 'MB'], [`${m.ok}/${m.docs}`, 'Docs'], [m.att, 'Attach.'], [m.prev, 'Prior ver.']])}
@@ -775,6 +795,7 @@
     }
     // keep typing focus across re-renders
     const ae = root.activeElement, focusLi = ae && ae.id === 'li', selA = focusLi ? ae.selectionStart : 0, selB = focusLi ? ae.selectionEnd : 0;
+    const oldPanel = root.querySelector('.panel'), scroll = oldPanel && lastView === view ? oldPanel.scrollTop : 0; lastView = view;
     const s = S.settings, run = S.run;
     const status = run ? (run.kind === 'single' ? '<span class="acc">● Downloading</span>' : run.paused ? `<span class="warn">● ${esc(run.title)} paused</span>` : `<span class="acc">● ${esc(run.title)} running</span>`)
       : S.pending ? '<span class="ok">● Awaiting approval</span>' : view === 'single' && S.single && S.single.phase === 'done' ? '<span class="ok">● Saved</span>' : '';
@@ -797,7 +818,7 @@
     hdr.onpointerdown = e => startDrag(e, hdr);
     hdr.ondblclick = e => { if (!e.target.closest('button')) { S.settings.pos = null; saveSettings(); placeHost(); } };
     on('min', 'onclick', () => { visible = false; render(); });
-    on('gear', 'onclick', () => { showSettings = !showSettings; render(); });
+    on('gear', 'onclick', () => { showSettings = !showSettings; sDraft = {}; render(); });
     on('msgx', 'onclick', () => { S.msg = ''; render(); });
 
     // single LI
@@ -816,7 +837,7 @@
 
     // run controls (both views)
     on('pause', 'onclick', () => { S.run.paused = !S.run.paused; render(); });
-    on('cancel', 'onclick', () => { S.run.cancel = true; S.run.paused = false; });
+    on('cancel', 'onclick', cancelRun);
 
     // bulk
     on('approve', 'onclick', safeRun(approve));
@@ -845,7 +866,7 @@
       s.batchSize = bs;
       s.outlet = $('s_outlet').value.trim(); s.user = $('s_user').value.trim(); s.ver = $('s_ver').value.trim();
       readFileBoxes();
-      await saveSettings(); setMsg(`Settings saved. Batch size is now ${bs}.`);
+      sDraft = {}; await saveSettings(); setMsg(`Settings saved. Batch size is now ${bs}.`);
     });
     const FK = ['docJson', 'histCsv', 'histJson', 'attCsv', 'manifest'];
     const readFileBoxes = () => { for (const k of FK) if ($('f_' + k)) s.files[k] = $('f_' + k).checked; };
@@ -859,12 +880,22 @@
       detectSession(); await detectUserFallback();
       if (s.pageSizeSrc === 'manual') s.pageSizeSrc = 'default';
       notePageSize(+document.documentElement.dataset.tipsxPageSize);
-      await saveSettings(); render();
+      sDraft = {}; await saveSettings(); render();
     });
     on('s_pos', 'onclick', async () => { s.pos = null; await saveSettings(); placeHost(); });
 
     if (focusLi && $('li') && !$('li').disabled) { $('li').focus(); $('li').setSelectionRange(selA, selB); }
+    if (showSettings) for (const id of S_FIELDS) { const el = $(id); if (!el) continue; if (id in sDraft) el.value = sDraft[id]; el.addEventListener('input', () => { sDraft[id] = el.value; }); }
+    root.querySelector('.panel').scrollTop = scroll;
     placeHost(); syncToolbar();
+  }
+  const cancelRun = () => { if (S.run) { S.run.cancel = true; S.run.paused = false; } };
+  function renderRunBox() {
+    const box = visible && root.getElementById('runbox');
+    if (!visible) render();                      // minimised button shows the step
+    else if (box && S.run) { box.innerHTML = vSingleRun(S.run); const c = root.getElementById('cancel'); if (c) c.onclick = cancelRun; }
+    else renderProgress();
+    syncToolbar();
   }
   function renderProgress() {
     const bar = root.getElementById('pbar'), lab = root.getElementById('plabel');
@@ -896,10 +927,13 @@
     error: '<path d="M12 9v4"></path><path d="M12 17h.01"></path><path d="M10.3 3.9L1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"></path>'
   };
 
+  let otCache = { key: '', val: null }, idxById = { n: -1, map: null };
   function openTopic() {
     const m = location.pathname.match(ROUTE_RE); if (!m) return null;
-    const tipsId = m[1], version = +m[2];
-    const ix = S.index.find(x => String(x.tipsId) === tipsId);
+    const tipsId = m[1], version = +m[2], key = location.pathname + '|' + S.index.length;
+    if (otCache.key === key && otCache.val) return otCache.val;   // cheap on repeat calls while the same topic is open
+    if (idxById.n !== S.index.length) idxById = { n: S.index.length, map: new Map(S.index.map(x => [String(x.tipsId), x])) };
+    const ix = idxById.map.get(tipsId);
     const det = document.querySelector('neo-topic-detail'), h2 = det && det.querySelector('h2');
     let tips = ix && ix.tips;
     if (!tips && det) {   // the Title tab's "Topic number" row, else the first LI-shaped number in the dialog
@@ -907,7 +941,9 @@
       const row = lab && (lab.nextElementSibling || lab.parentElement.nextElementSibling);
       tips = ((row && row.textContent.match(LI_RE)) || det.textContent.match(LI_RE) || [])[0];
     }
-    return tips ? { tips, tipsId: ix ? ix.tipsId : tipsId, version, title: ix ? ix.title : (h2 ? h2.textContent.trim() : '') } : null;
+    const val = tips ? { tips, tipsId: ix ? ix.tipsId : tipsId, routeId: tipsId, version, title: ix ? ix.title : (h2 ? h2.textContent.trim() : '') } : null;
+    otCache = { key, val };
+    return val;
   }
   function tipHtml() {
     if (tb.state === 'busy') return `Downloading${S.run && S.run.kind === 'single' ? ' – ' + esc(runLabel(S.run)) : '…'}<small>TIPS Exporter</small>`;
@@ -925,8 +961,10 @@
         b.setAttribute('aria-busy', String(tb.state === 'busy'));
         if (tb.state === 'done' || tb.state === 'error') b.parentElement.setAttribute('data-show', ''); else b.parentElement.removeAttribute('data-show');
       }
-      const tip = b.nextElementSibling, html = tipHtml();
-      if (tip && tip.innerHTML !== html) tip.innerHTML = html;
+      const tip = b.nextElementSibling;
+      if (!tip || (tb.state === 'idle' && tip.innerHTML && !b.parentElement.matches(':hover') && document.activeElement !== b)) continue;
+      const html = tipHtml();
+      if (tip.innerHTML !== html) tip.innerHTML = html;
     }
   }
   async function downloadOpenTopic() {
@@ -934,19 +972,28 @@
     const settle = (state, msg, ms) => { tb.state = state; tb.msg = msg; syncToolbar(); setTimeout(() => { if (tb.state === state) { tb.state = 'idle'; syncToolbar(); } }, ms); };
     const t = openTopic();
     if (!t) return settle('error', "Couldn't tell which topic is open – use the panel instead.", 6000);
-    if (S.run || S.pending) return settle('error', 'A bulk batch is running or waiting for approval – finish or discard it first.', 6000);
+    if (S.pending || (S.run && S.run.kind === 'bulk')) return settle('error', 'A bulk batch is running or waiting for approval – finish or discard it first.', 6000);
+    if (S.run || (S.single && S.single.phase === 'looking')) return settle('error', 'Another download is running – wait for it to finish.', 6000);
     if (!sessionOK()) return settle('error', 'Session not detected – open the panel and check ⚙ Settings.', 6000);
-    tb.state = 'busy'; tb.msg = ''; view = 'single'; liText = t.tips; syncToolbar();
+    // Keep a list the user looked up in the panel; it comes back after this download.
+    const keep = S.single && S.single.phase === 'looked' ? { single: S.single, liText } : null;
+    const restore = () => { if (keep) { S.single = keep.single; liText = keep.liText; } };
+    tb.state = 'busy'; tb.msg = ''; S.single = { phase: 'looking' }; syncToolbar(); render();   // 'looking' also locks the panel's Look up
+    const msg0 = S.msg;
     try {
       const hit = await searchByNumber(t.tips.toUpperCase());   // current version, live from TIPS
-      S.single = { phase: 'looked', found: [hit || t], problems: [] };
+      // Never download a different topic than the one open: the LI number must belong to the topic in the address.
+      if (hit && String(hit.tipsId) !== String(t.routeId)) { S.single = null; restore(); return settle('error', `${t.tips} is not the topic that's open – use the panel instead.`, 6000); }
+      if (S.run || S.pending) { S.single = null; restore(); return settle('error', 'Another download started – try again when it finishes.', 6000); }
+      S.single = { phase: 'looked', found: [hit || { tips: t.tips, tipsId: t.routeId, version: t.version, title: t.title }], problems: [] };
       await downloadFound();
       if (S.single && S.single.phase === 'done') {
-        const m = S.single.sum;
-        settle('done', `Saved ${S.single.fname} (${m.sizeMB} MB)${m.errors.length ? ` – ${m.errors.length} file(s) could not be saved, see the panel` : ''}`, 5000);
-        fabFlash = { text: `Saved ${S.single.fname}`, until: Date.now() + 6000 }; setTimeout(render, 6100);
-      } else settle('error', S.msg || 'Download stopped – nothing saved.', 6000);
-    } catch (e) { settle('error', e.message, 6000); }
+        const m = S.single.sum, fname = S.single.fname;
+        settle('done', `Saved ${fname} (${m.sizeMB} MB)${m.errors.length ? ` – ${m.errors.length} file(s) could not be saved, see _errors.txt in the zip` : ''}`, 5000);
+        fabFlash = { text: `Saved ${fname}`, until: Date.now() + 6000 }; setTimeout(render, 6100);
+        if (keep) restore();
+      } else { restore(); settle('error', S.msg !== msg0 && S.msg ? S.msg : 'Download stopped – nothing saved.', 6000); }
+    } catch (e) { S.single = null; restore(); settle('error', e.message, 6000); }
     render();
   }
   function injectToolbar() {
@@ -955,6 +1002,7 @@
       const st = document.createElement('style'); st.id = 'tipsx-page-css'; st.textContent = PAGE_CSS;
       (document.head || document.documentElement).appendChild(st);
     }
+    let added = false;
     for (const print of document.querySelectorAll('neo-topic-detail button.xy-i-print')) {
       const anchor = print.closest('xy-c-spinner') || print.parentElement;
       if (!anchor || !anchor.parentElement || anchor.parentElement.querySelector(':scope > .tipsx-dlwrap')) continue;
@@ -970,8 +1018,9 @@
       anchor.after(wrap);
       b.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); downloadOpenTopic(); });
       wrap.addEventListener('mouseenter', syncToolbar);
+      added = true;
     }
-    syncToolbar();
+    if (added) syncToolbar();
   }
   let injectQueued = false;
   new MutationObserver(muts => {
