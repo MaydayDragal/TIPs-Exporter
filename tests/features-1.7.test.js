@@ -41,7 +41,7 @@ async function fakeFetch(url, init = {}) {
   if (u.startsWith('https://s3.example/')) return { ok: true, status: 200, arrayBuffer: async () => new Uint8Array(1024).buffer };
   return { ok: false, status: 404 };
 }
-const cards = () => T.map(t => `<div class="xy-mb-1"><xy-c-card-table-card id="card-${t.tipsId}_${t.version}_P" class="xy-c-card-table-card"><button type="button" class="xy-c-card-table-card" style="width:900px">
+const cards = (list = T) => list.map(t => `<div class="xy-mb-1"><xy-c-card-table-card id="card-${t.tipsId}_${t.version}_P" class="xy-c-card-table-card"><button type="button" class="xy-c-card-table-card" style="width:900px">
   <div><div class="xy-grid"><xy-c-card-column><div><div><span><span><p>${t.tips}</p></span></span></div></div></xy-c-card-column>
   <xy-c-card-column><div><div><p class="xy-copy">${t.title}</p></div></div></xy-c-card-column><xy-c-card-column><p>9/21/26</p></xy-c-card-column><xy-c-card-column><p>All Models</p></xy-c-card-column></div></div></button></xy-c-card-table-card></div>`).join('');
 
@@ -173,6 +173,22 @@ const IDX = T.map(t => ({ tips: t.tips, tipsId: t.tipsId, version: t.version, ti
     e.w.document.querySelector('.xy-c-card-list-wrapper > div').insertAdjacentHTML('beforeend', `<div><xy-c-card-table-card id="card-105_1_P"><button><xy-c-card-column><p>LI82.60-P-080383</p></xy-c-card-column><xy-c-card-column><p>Radio cover art</p></xy-c-card-column></button></xy-c-card-table-card></div>`);
     await tick(100);
     ok(!!e.w.document.querySelector('#card-105_1_P > .tipsx-row'), 'rows loaded later (scrolling) get controls too');
+  }
+  // ---- 6b: selection follows the list order (not TIPS's internal ids); the last row can scroll clear of the bar
+  {
+    const e = makeEnv({ index: IDX }, cards([...T].reverse()));
+    await tick(200);
+    const rows = [...e.w.document.querySelectorAll('.tipsx-row')], last = rows.at(-1).parentElement;
+    ok(!last.classList.contains('tipsx-lastpad'), 'no extra space below the list while nothing is ticked');
+    rows[2].querySelector('input').click(); rows[0].querySelector('input').click(); await tick(30);
+    ok(/2 selected LI20\.10-P-075374, LI46\.10-P-070001/.test(e.text()), 'selection bar lists topics in the order they appear on the page');
+    ok(last.classList.contains('tipsx-lastpad') && e.w.document.querySelectorAll('.tipsx-lastpad').length === 1, 'last row gets space below it while the bar shows');
+    e.$('selclear').click(); await tick(30);
+    ok(!e.w.document.querySelector('.tipsx-lastpad') && !e.$('seldl'), 'Clear removes the bar and the extra space');
+    rows[2].querySelector('input').click(); rows[0].querySelector('input').click(); await tick(30);
+    e.$('seldl').click(); await waitFor(() => /Saved to Downloads/.test(e.text()));
+    const tops = [...new Set((await unzip(e.w, e.saved.at(-1).blob)).filter(n => n.includes('/')).map(n => n.split('/')[0].slice(0, 16)))];
+    ok(tops.join(' ') === 'LI20.10-P-075374 LI46.10-P-070001', 'the zip keeps the page order too');
   }
   // ---- 7: keyboard shortcut
   const man = JSON.parse(fs.readFileSync(SRC + 'manifest.json', 'utf8'));

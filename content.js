@@ -1073,7 +1073,8 @@
   .tipsx-sel input:focus-visible,.tipsx-rdl:focus-visible{outline:2px solid #006EFF;outline-offset:2px}
   .tipsx-rdl{width:36px;height:36px;display:inline-flex;align-items:center;justify-content:center;border:0;background:transparent;color:#595959;cursor:pointer;padding:0}
   .tipsx-rdl:hover{background:#e6f1ff;color:#006EFF} .tipsx-rdl[data-state=busy]{color:#006EFF;cursor:progress} .tipsx-rdl[data-state=done]{color:#018601} .tipsx-rdl[data-state=error]{color:#EA060A}
-  xy-c-card-table-card.tipsx-picked > button{box-shadow:inset 3px 0 0 #006EFF}`;
+  xy-c-card-table-card.tipsx-picked > button{box-shadow:inset 3px 0 0 #006EFF}
+  xy-c-card-table-card.tipsx-lastpad{margin-bottom:104px !important}`;
   const pageSvg = (d, n) => `<svg width="${n}" height="${n}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${d}</svg>`;
   const TB_ICON = {
     idle: '<path d="M12 3v12"></path><path d="M7 10l5 5 5-5"></path><path d="M5 21h14"></path>',
@@ -1182,6 +1183,20 @@
   // Each topic in the search results is a card <xy-c-card-table-card id="card-<topicId>_<version>_P"> holding one big button.
   // Our controls sit beside that button (not inside it) at the right edge of the card.
   const ROW_RE = /^card-(\d+)_(\d+)_P$/, rowState = {};
+  let selSeq = 0;
+  // Selected topics in the order they appear in the results list (ticked rows no longer on the page go last, in tick order).
+  function selList() {
+    const pos = {}; let i = 0;
+    for (const c of document.querySelectorAll('xy-c-card-table-card[id^="card-"]')) { const m = c.id.match(ROW_RE); if (m && !(m[1] in pos)) pos[m[1]] = i++; }
+    const at = x => x.tipsId in pos ? pos[x.tipsId] : 1e9 + (x.at || 0);
+    return Object.values(S.sel).sort((a, b) => at(a) - at(b)).map(({ at: _, ...x }) => x);
+  }
+  // While the selection bar shows, the last result card gets extra space below it so it can be scrolled clear of the bar.
+  function padLast() {
+    const cards = document.querySelectorAll('xy-c-card-table-card[id^="card-"]'), last = cards[cards.length - 1], on = Object.keys(S.sel).length > 0;
+    for (const c of document.querySelectorAll('.tipsx-lastpad')) if (c !== last || !on) c.classList.remove('tipsx-lastpad');
+    if (last && on) last.classList.add('tipsx-lastpad');
+  }
   function injectRows() {
     let added = false;
     for (const card of document.querySelectorAll('xy-c-card-table-card[id^="card-"]')) {
@@ -1200,7 +1215,7 @@
       const cb = box.querySelector('input'), dl = box.querySelector('.tipsx-rdl');
       box.addEventListener('click', e => e.stopPropagation());
       cb.checked = !!S.sel[item.tipsId];
-      cb.addEventListener('change', () => { if (cb.checked) S.sel[item.tipsId] = item; else delete S.sel[item.tipsId]; syncRows(); render(); });
+      cb.addEventListener('change', () => { if (cb.checked) S.sel[item.tipsId] = { ...item, at: ++selSeq }; else delete S.sel[item.tipsId]; syncRows(); render(); });
       dl.addEventListener('click', e => { e.preventDefault(); downloadRow(item); });
       card.appendChild(box); added = true;
     }
@@ -1213,6 +1228,7 @@
       if (cb.checked !== !!S.sel[id]) cb.checked = !!S.sel[id];
       box.parentElement.classList.toggle('tipsx-picked', !!S.sel[id]);
     }
+    padLast();
   }
   async function downloadRow(item) {
     if (rowState[item.tipsId] === 'busy') return;
@@ -1230,7 +1246,7 @@
     render();
   }
   function downloadSelected() {
-    const found = Object.values(S.sel);
+    const found = selList();
     if (!found.length || busy()) return;
     S.single = { phase: 'looked', found, problems: [] }; liText = '';
     S.sel = {}; syncRows();
@@ -1240,8 +1256,9 @@
   }
   function renderSelBar() {
     const n = Object.keys(S.sel).length;
+    padLast();
     if (!n) { root.innerHTML = ''; return; }
-    const names = Object.values(S.sel).map(x => x.tips);
+    const names = selList().map(x => x.tips);
     root.innerHTML = `<style>${css}</style><div class="selbar" role="region" aria-label="Selected topics">
       <div class="bd"><b>${n} selected</b><span class="mut sm">${esc(names.slice(0, 3).join(', '))}${n > 3 ? ' …' : ''}</span></div>
       <button class="b bar" id="selclear">Clear</button><button class="b pri" id="seldl" ${busy() ? 'disabled' : ''}>${I.dl}Download ${n}</button></div>`;
