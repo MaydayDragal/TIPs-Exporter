@@ -1,6 +1,6 @@
 # TIPS Exporter (Chrome extension)
 
-This extension downloads XENTRY TIPS Reader topics, either the specific LI documents you ask for or the whole catalogue in batches. It runs inside your logged-in Chrome tab, so it never handles your password or sign-in. For each document it saves the current PDF, the raw data, attachments and links, the revision history, and a PDF of every prior version. Bulk batches become one zip each, and nothing downloads until you approve the batch.
+This extension downloads XENTRY TIPS Reader topics, either the specific LI documents you ask for or the whole catalogue in batches, and your TIPS cases as readable reports with their files. It runs inside your logged-in Chrome tab, so it never handles your password or sign-in. For each document it saves the current PDF, the raw data, attachments and links, the revision history, and a PDF of every prior version. Bulk batches become one zip each, and nothing downloads until you approve the batch.
 
 ## Install (one time)
 
@@ -39,6 +39,23 @@ This is the **Single LI** tab, the drawer's main screen.
 When you open a topic in TIPS, a download button (with a small blue dot) appears in the topic's toolbar, next to **Print**. Hover over it to see what you'll get, e.g. "Download LI42.10-P-078779 with all 5 prior versions, attachments and links". Click it to download straight away: no typing, no lookup step. The button spins while it works and then shows a green tick, and the **⋮** button shows the downloading, then saved, badge. The zip is the same as a download from the drawer. If TIPS changes its layout and the button stops appearing, use the drawer as usual.
 
 **Recent downloads** keeps your last 10 downloads in this browser. The ↻ button looks the same documents up again. Single-LI downloads never change bulk-export progress.
+
+## Download cases
+
+The **Cases** tab downloads your TIPS cases, one or several at a time. It only reads cases; it never sends, closes or changes anything.
+
+1. Type one or more case numbers (9 digits, the **Case number** shown in an open case), separated by spaces, commas or new lines, and click **Look up**. Each case shows its title, status, vehicle, and how many files and messages it has.
+2. Click **Download N**. You get `TIPS_Case_<number>.zip` (or `TIPS_Cases_<date>_<n>cases.zip` for several), with one folder per case:
+
+```
+Case <number> - <title>/
+    Case report.html     vehicle, fault codes, summary, complaint, measures, result and the message history
+    Attachments/         every file uploaded to the case
+```
+
+The report opens in any browser and prints cleanly. Its message history shows what TIPS shows the workshop, in date order, with each uploaded file linked to its saved copy. Messages that TIPS keeps internal to workshop support and headquarters, and internal notes, are left out.
+
+When a case is open in TIPS, the same download button as for topics appears next to **Print** in the case's toolbar.
 
 ## Controls
 
@@ -101,6 +118,7 @@ After installing an update, reload the extension in `chrome://extensions`, reloa
 2. **⚙ → Check setup** shows ✓ for Session, Drawer position, ⋮ menu and TIPS fonts.
 3. Open a topic: the download button appears next to **Print**; clicking it saves `TIPS_<LI>.zip` for that topic, and the ⋮ button shows the green badge.
 4. In **Single LI**, look up two LI numbers and download them; the zip has both folders.
-5. In **Bulk export**, set the batch size to 2 under ⚙, prepare a batch, approve it, and check the progress log updates.
-6. Reload TIPS: your settings and progress are still there.
+5. Open a case: the download button appears next to **Print**; the zip has `Case report.html` and the case's files.
+6. In **Bulk export**, set the batch size to 2 under ⚙, prepare a batch, approve it, and check the progress log updates.
+7. Reload TIPS: your settings and progress are still there.
 

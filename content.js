@@ -30,6 +30,7 @@
     history: [],        // [{n, fname, sizeMB, docs, ok, att, prev, errors, date}]
     recent: [],         // single-LI downloads [{fname, tips: [..], v, sizeMB, docs, date}]
     single: null,       // single-LI flow: {phase: 'looking'|'looked'|'done', ...}
+    cases: null,        // cases flow, same phases
     settings: { outlet: '', user: '', ver: '', batchSize: 25, delayMs: 2000, delayMaxMs: 5000, pageSize: 50, pageSizeSrc: 'default',
       autoApprove: false, autoContinue: true,
       files: { docJson: true, attCsv: true, histCsv: true, histJson: true, manifest: true } },
@@ -317,7 +318,7 @@
 
   // ---------------------------------------------------------------- run documents -> zip
   // Exports `items` one by one with pause/cancel support. Returns {files, errors, results} or null if stopped.
-  async function runDocs(title, items, kind = 'bulk') {
+  async function runDocs(title, items, kind = 'bulk', exporter = exportDoc) {
     const files = [], errors = [], results = [];
     S.run = { title, kind, items, results, i: 0, total: items.length, label: '', step: null, attN: 0, paused: false, cancel: false };
     render();
@@ -335,10 +336,10 @@
         if (S.run.cancel) throw new Error('cancelled');
         S.run.i++; S.run.label = it.tips; S.run.step = null; S.run.attN = 0; render();
         try {
-          const r = await exportDoc(it, files, errors, (s, info) => {
+          const r = await exporter(it, files, errors, (s, info) => {
             S.run.label = `${it.tips} – ${s}`; S.run.step = info || null;
             if (info && info.g === 'att') S.run.attN = info.n;
-            if (S.run.kind === 'single') renderRunBox(); else renderProgress();
+            if (S.run.kind !== 'bulk') renderRunBox(); else renderProgress();
           });
           results.push({ ...it, ...r, status: 'ok' });
         } catch (e) {
@@ -464,6 +465,213 @@
     const sum = summarize(fname, blob, results, errors);
     S.single = { phase: 'done', fname, sum, problems };
     S.recent.unshift({ fname, tips: found.map(f => f.tips), v: found.length === 1 ? found[0].version : null, sizeMB: sum.sizeMB, docs: found.length, date: new Date().toISOString() });
+    S.recent = S.recent.slice(0, 10);
+    await saveRecent();
+    railFlash = Date.now() + 6000; setTimeout(render, 6100);
+    render();
+  }
+
+  // ---------------------------------------------------------------- Cases (read-only)
+  // Only GETs: the case, and its uploaded files. The case's write endpoints (history.allowedOperations) are never used.
+  const CASE_RE = /^\d{9}$/;
+  const caseQ = () => `lang=en&area=WS&countryid=US&team=${encodeURIComponent(S.settings.outlet)}&uid=${encodeURIComponent(S.settings.user)}&currentOutlet=${encodeURIComponent(S.settings.outlet)}`;
+  // path: the exact address the Reader loaded an open case from (noted by the page probe) – used for external cases
+  async function fetchCase(id, path) {
+    const url = path && path.startsWith('/') ? path : `/tips/case-service/api/v1/cases/${encodeURIComponent(id)}?${caseQ()}`;
+    const r = await fetch(url, { credentials: 'include', headers: H(), cache: 'no-store' });
+    if (r.status === 401 || r.status === 403) throw new SessionError('Session expired or not authorised (HTTP ' + r.status + ')');
+    if (r.status === 404 || r.status === 400) return null;
+    if (!r.ok) throw new Error('case HTTP ' + r.status);
+    return r.json();
+  }
+  // External cases are anonymized by TIPS after they are opened; until then fields read "anonymization is in progress...".
+  // Ask again every few seconds (up to 2 minutes) instead of saving the placeholders.
+  // Only the fields that go into the report count – other fields of an external case can keep the placeholder for good.
+  const ANON_RE = /anonymi[sz]ation is in progress/i;
+  const caseTexts = c => [c.wsTitle, c.complaint, c.finding, c.performedMeasure,
+    ...(((c.history && c.history.messages) || []).flatMap(m => [m.text, m.text2, m.text3]))].filter(t => t != null && String(t).trim() && !/^\s*(null|undefined)\s*$/i.test(String(t)));
+  const anonShare = c => { const t = caseTexts(c); return t.length ? t.filter(x => ANON_RE.test(String(x))).length / t.length : 0; };
+  const anonPending = c => !!c && anonShare(c) > 0;
+  async function fetchCaseReady(id, path, onWait, fallback) {
+    let c = await fetchCase(id, path);
+    const t0 = Date.now();
+    for (let i = 0; c && anonPending(c); i++) {
+      const waited = Math.round((Date.now() - t0) / 1000);
+      if (fallback && waited >= 4) { const d = fallback(c); if (d) return d; }
+      // Mostly done after a while: keep what is there; leftover placeholders are marked in the report.
+      if (waited >= 20 && !ANON_RE.test(String(c.wsTitle || '')) && anonShare(c) <= 0.25) break;
+      if (waited > 45) throw new Error(`TIPS hasn't finished anonymizing case ${id} – nothing saved. Try again in a minute; if it keeps happening, send the "Recent case requests" row from ⚙ → Check setup.`);
+      if (onWait) onWait(waited);
+      await sleep(Math.min(1500 + i * 500, 4000));
+      c = await fetchCase(id, path);
+    }
+    return c;
+  }
+  // The open case dialog, as TIPS shows it. Used when the case data still has placeholders (external cases).
+  function caseFromDom(base) {
+    const dlg = document.querySelector('neo-case-detail');
+    const bubbles = dlg ? [...dlg.querySelectorAll('.speech-bubble, .speech-bubble-right')] : [];
+    if (!bubbles.length) return null;
+    const msgs = [], atts = [];
+    bubbles.reverse().forEach((b, i) => {
+      const head = b.firstElementChild, strong = head && head.querySelector('strong');
+      const label = strong ? strong.textContent.trim() : '';
+      const spans = head ? [...head.children].filter(x => x.tagName === 'SPAN') : [];
+      const dateText = spans.length > 1 ? spans[spans.length - 1].textContent.trim() : '';
+      const who = spans[0] ? spans[0].textContent.replace(label, '').replace(/^\s*-\s*/, '').replace(/^\(unknown\)\s*/i, '').trim() : '';
+      const bodyEl = b.querySelector('.ql-editor'), key = 'dom-' + String(i).padStart(4, '0');
+      const link = b.querySelector('tn-attachment-preview a[download]');
+      if (link) {
+        const ext = (label.match(/\.([A-Za-z0-9]{2,5})\)?\s*$/) || [])[1];
+        let fn = link.getAttribute('download') || 'attachment_' + i;
+        if (ext && !fn.toLowerCase().endsWith('.' + ext.toLowerCase())) fn += '.' + ext;
+        atts.push({ id: i, filename: fn, dataUrl: link.href, wsDescription: bodyEl ? bodyEl.textContent.trim() : '', creationDate: key, dateText });
+      } else {
+        const html = (bodyEl ? bodyEl.innerHTML : '').replace(/Remarks:\s*(?:<br\s*\/?>|\s|<\/?p>)*null\s*(?:<\/p>)?\s*$/i, '');
+        msgs.push({ dom: true, label, who, creationDate: key, dateText, html });
+      }
+    });
+    if (!msgs.length || msgs.some(m => ANON_RE.test(m.html))) return null;   // TIPS itself hasn't finished yet
+    const pre = dlg.querySelector('neo-case-chat pre'), keep = v => v && !ANON_RE.test(String(v)) ? v : '';
+    const b = base || {};
+    return { ...b, wsTitle: keep(b.wsTitle) || 'External case', complaint: keep(b.complaint), finding: keep(b.finding), performedMeasure: keep(b.performedMeasure),
+      summary: pre ? pre.textContent : null, attachments: atts, history: { ...(b.history || {}), messages: msgs }, __dom: true };
+  }
+  const nz = v => v == null || /^\s*(null|undefined)\s*$/i.test(String(v)) ? '' : ANON_RE.test(String(v)) ? '(anonymized by TIPS)' : v;   // TIPS sends some empty fields as the text "null"
+  // History entries the Reader shows to the workshop. Other entries (WhS/HQ-internal traffic) are left out,
+  // except ones addressed to this outlet (remark "<location>#<outlet>#…").
+  const CASE_MSG = { 101: 'Message workshop → WhS', 107: 'Feedback, workshop → WhS completed', 109: 'Close workshop', 122: 'Reply date set',
+    126: 'Notification WhS → workshop', 128: 'Close WhS', 132: 'Notification WhS → workshop' };
+  const toOutlet = m => !!(m.remark && S.settings.outlet && String(m.remark).split('#')[1] === S.settings.outlet);
+  const caseMessages = c => ((c.history && c.history.messages) || []).filter(m => m.dom || CASE_MSG[m.type] || (toOutlet(m) && (m.text || '').trim()));
+  const caseStatus = c => { const w = ((c.caseinvolveds || []).find(x => x.category === 'WS') || {}).workstate; return w === 'C' ? 'Closed' : w ? 'Open' : ''; };
+  const caseTitle = c => String(nz(c.wsTitle) || nz(c.whsTitle) || `Case ${c.id}`).trim();
+  const caseZipName = found => found.length === 1 ? `TIPS_Case_${found[0].id}.zip` : `TIPS_Cases_${new Date().toISOString().slice(0, 10)}_${found.length}cases.zip`;
+  const safeFile = (n, fb) => { const m = String(n || fb).match(/^(.*?)(\.[A-Za-z0-9]{1,5})?$/); return safe(m[1]).slice(0, 110) + (m[2] || ''); };
+
+  // Rich text from TIPS -> a small safe subset (no attributes, scripts or links)
+  const RICH = new Set(['P', 'BR', 'B', 'STRONG', 'I', 'EM', 'U', 'S', 'UL', 'OL', 'LI']), DROP = new Set(['SCRIPT', 'STYLE', 'IFRAME', 'OBJECT', 'EMBED', 'NOSCRIPT', 'TEMPLATE', 'TITLE', 'HEAD']);
+  function cleanHtml(html) {
+    const doc = new DOMParser().parseFromString(`<div>${nz(html) || ''}</div>`, 'text/html');
+    const walk = n => [...n.childNodes].map(c => c.nodeType === 3 ? esc(c.textContent) : c.nodeType !== 1 || DROP.has(c.tagName) ? '' :
+      c.tagName === 'BR' ? '<br>' : RICH.has(c.tagName) ? `<${c.tagName.toLowerCase()}>${walk(c)}</${c.tagName.toLowerCase()}>` : walk(c)).join('');
+    return walk(doc.body.firstChild).replace(/<p>(<br>)?<\/p>/g, '').trim();
+  }
+  const richOrText = t => !(t = nz(t)) ? '' : /<[a-z][\s\S]*>/i.test(t) ? cleanHtml(t) : esc(t).replace(/\n/g, '<br>');
+
+  function caseReportHtml(c, atts, id) {
+    const v = c.vehicle || {}, dt = x => x ? new Date(x).toLocaleString('en-US', { dateStyle: 'short', timeStyle: 'short' }) : '';   // TIPS style: 9/22/26, 2:00 PM
+    const rows = a => a.filter(([, b]) => b !== '' && b != null).map(([k, b]) => `<tr><th>${esc(k)}</th><td>${b}</td></tr>`).join('');
+    const wh = (c.caseinvolveds || []).find(x => x.category === 'WH');
+    const msgs = caseMessages(c), total = ((c.history && c.history.messages) || []).length;
+    const body = m => {
+      if (m.dom) return cleanHtml(m.html);
+      if (m.type === 101) return [['Customer complaint', m.text], ['Workshop findings', m.text2], ['Measures performed and results obtained', m.text3]]
+        .filter(([, t]) => cleanHtml(t)).map(([h, t]) => `<h4>${h}</h4>${richOrText(t)}`).join('');
+      if (m.type === 122) return nz(m.remark) && /^\d{10,}$/.test(m.remark) ? `Reply by ${esc(dt(+m.remark))}` : richOrText(m.text);
+      return richOrText(m.text);
+    };
+    const events = [
+      ...msgs.map(m => ({ at: m.creationDate, html: `<div class="ev${[101, 107, 109].includes(m.type) ? ' ws' : ''}"><div class="eh"><b>${esc(CASE_MSG[m.type] || m.label || 'Message to workshop')}</b>${m.dom ? (m.who ? ' – ' + esc(m.who) : '') : nz(m.commonName) && !ANON_RE.test(m.commonName) ? ' – ' + esc(m.commonName) : ''}<span>${esc(m.dateText || dt(m.creationDate))}</span></div>${body(m) || ''}</div>` })),
+      ...atts.map(a => ({ at: a.creationDate, html: `<div class="ev att"><div class="eh"><b>New attachment</b><span>${esc(a.dateText || dt(a.creationDate))}</span></div>${a.ok ? `<a href="Attachments/${encodeURI(a.fn)}">${esc(a.fn)}</a>` : `${esc(a.fn)} <em>(could not be saved)</em>`}${a.wsDescription ? `<div class="mut">${esc(a.wsDescription)}</div>` : ''}</div>` }))
+    ].sort((a, b) => String(a.at).localeCompare(String(b.at)));
+    const fcs = c.controlDeviceFaultCodes || [];
+    const feedback = nz(c.wsFeedback && c.wsFeedback.feedback) || nz(c.whsFeedback && c.whsFeedback.feedback) || '';
+    return `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Case ${esc(id)} – ${esc(caseTitle(c))}</title><style>
+body{margin:0;background:#f2f2f2;font:14px/1.45 Arial,Helvetica,sans-serif;color:#333}
+main{max-width:900px;margin:0 auto;background:#fff;padding:32px 40px 48px}
+h1{font:400 26px/1.25 Georgia,'Times New Roman',serif;margin:0 0 4px} h2{font:400 21px Georgia,serif;margin:28px 0 8px;padding-bottom:6px;border-bottom:1px solid #dedede}
+h4{margin:10px 0 2px;font-size:13px;color:#595959} .mut{color:#595959} .sub{color:#595959;margin-bottom:12px}
+table{border-collapse:collapse;width:100%} th{text-align:left;width:190px;color:#595959;font-weight:400;vertical-align:top} th,td{padding:7px 8px 7px 0;border-bottom:1px solid #eee}
+table.fc th{width:auto;font-weight:700;color:#333}
+.badge{display:inline-block;padding:2px 8px;border-radius:11px;background:#006EFF;color:#fff;font-size:12px}.badge.closed{background:#595959}
+pre{white-space:pre-wrap;font:inherit;background:#f7f7f7;padding:12px 14px;margin:0}
+.ev{padding:10px 14px;margin:8px 0;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.2)} .ev.ws{background:#f2f7ff} .ev.att{background:#f7f7f7}
+.eh{display:flex;gap:6px;flex-wrap:wrap} .eh span{margin-left:auto;color:#595959}
+.ev p{margin:4px 0} a{color:#006EFF} footer{margin-top:32px;font-size:12px;color:#595959}
+@media print{body{background:#fff}main{padding:0}.ev{box-shadow:none;border:1px solid #ddd;break-inside:avoid}}
+</style></head><body><main>
+<h1>${esc(caseTitle(c))}</h1>
+<div class="sub">Case ${esc(id)} ${caseStatus(c) ? `<span class="badge${caseStatus(c) === 'Closed' ? ' closed' : ''}">${esc(caseStatus(c))}</span>` : ''}</div>
+<table>${rows([['Case number', esc(id)], ['Status', esc(caseStatus(c))], ['Created', esc(dt(c.creationDate))], ['Last modified', esc(dt(c.history && c.history.modificationDate))],
+  ['Reply deadline', esc(dt(c.wsDeadline))], ['Workshop support', esc(wh ? wh.teamId : '')], ['Symptom', esc(((c.symptom && c.symptom.names) || []).join(' › '))]])}</table>
+<h2>Vehicle</h2>
+<table>${rows([['VIN', esc(v.vin || v.fin || '')], ['Model', esc(v.vehiclemodel || '')], ['Vehicle / engine / transmission', esc([v.vs, v.ve, v.vt].filter(Boolean).join(' · '))],
+  ['Mileage', v.mileage != null ? esc(Number(v.mileage).toLocaleString()) : ''], ['Production date', esc(v.proddate ? new Date(v.proddate).toLocaleDateString('en-US', { timeZone: 'UTC' }) : '')]])}</table>
+${fcs.length ? `<h2>Fault codes</h2><table class="fc"><tr><th>Code</th><th>Description</th><th>Control unit</th></tr>${fcs.map(f => `<tr><td>${esc(f.fcCode)}</td><td>${esc(f.fcText)}</td><td>${esc(f.cdText)}</td></tr>`).join('')}</table>` : ''}
+${nz(c.summary) ? `<h2>Summary (AI, as shown in TIPS)</h2><pre>${esc(c.summary)}</pre>` : ''}
+${cleanHtml(c.complaint) ? `<h2>Complaint</h2>${cleanHtml(c.complaint)}` : ''}
+${cleanHtml(c.finding) ? `<h2>Findings</h2>${cleanHtml(c.finding)}` : ''}
+${cleanHtml(c.performedMeasure) ? `<h2>Measures performed</h2>${cleanHtml(c.performedMeasure)}` : ''}
+${feedback ? `<h2>Result</h2><p>${esc(feedback)}</p>` : ''}
+<h2>History</h2>${events.map(e => e.html).join('') || '<p class="mut">No messages.</p>'}
+${atts.length ? `<h2>Uploaded files</h2><table>${atts.map(a => `<tr><th>${esc(a.dateText || dt(a.creationDate))}</th><td>${a.ok ? `<a href="Attachments/${encodeURI(a.fn)}">${esc(a.fn)}</a>` : esc(a.fn) + ' <em>(could not be saved)</em>'}${a.wsDescription ? `<div class="mut">${esc(a.wsDescription)}</div>` : ''}</td></tr>`).join('')}</table>` : ''}
+<footer>Exported from TIPS on ${esc(new Date().toLocaleString())} with TIPS Exporter.${c.__dom ? ' History, messages and files as shown in the TIPS case view (external case, limited reading view).' : total > msgs.length ? ` ${total - msgs.length} internal case event${total - msgs.length > 1 ? 's' : ''} that TIPS doesn't show to the workshop ${total - msgs.length > 1 ? 'are' : 'is'} not included.` : ''}</footer>
+</main></body></html>`;
+  }
+
+  async function exportCase(item, files, errors, step) {
+    step('case details', { g: 'data' });
+    const c = item.detail && (item.ready || !anonPending(item.detail)) ? item.detail
+      : await fetchCaseReady(item.id, item.path, w => step(`waiting for TIPS to finish anonymizing (${w} s)`, { g: 'data' }));
+    if (!c) throw new Error('case not found');
+    const base = `Case ${item.id} - ${safe(caseTitle(c))}`;
+    const atts = c.attachments || [], out = [], used = new Set();
+    for (const [k, a] of atts.entries()) {
+      let fn = safeFile(a.filename, 'attachment_' + a.id);
+      while (used.has(fn.toLowerCase())) fn = '_' + fn; used.add(fn.toLowerCase());
+      step(`file ${k + 1}/${atts.length}`, { g: 'att', k: k + 1, n: atts.length });
+      try {
+        let data = null;
+        const rk = a.readKey || (a.dataUrl && new URL(a.dataUrl, location.href).searchParams.get('readKey'));
+        if (rk) {
+          const ur = await get('/ats/public/attachment/v1/read/download/url?readKey=' + encodeURIComponent(rk), 'application/json');
+          if (ur.ok) { const uj = await ur.json(); const s3 = uj.url.startsWith('http') ? uj.url : 'https://' + uj.url; const br = await fetch(s3); if (br.ok) data = new Uint8Array(await br.arrayBuffer()); }
+        }
+        if (!data && a.dataUrl) { const br = await fetch(a.dataUrl, { credentials: 'same-origin' }); if (!br.ok) throw new Error('HTTP ' + br.status); data = new Uint8Array(await br.arrayBuffer()); }
+        if (!data) throw new Error('no download link');
+        files.push({ name: `${base}/Attachments/${fn}`, data }); out.push({ ...a, fn, ok: true });
+      } catch (e) { if (e instanceof SessionError) throw e; errors.push(`Case ${item.id}: file "${fn}" ${e.message}`); out.push({ ...a, fn, ok: false }); }
+      await sleep(150);
+    }
+    files.push({ name: `${base}/Case report.html`, data: txt(caseReportHtml(c, out, item.id)) });
+    return { version: '', attachments: out.filter(x => x.ok).length, attachmentsListed: atts.length, links: 0, prevVersions: 0, histEvents: caseMessages(c).length };
+  }
+
+  let caseText = '';
+  async function lookupCases(text) {
+    if (S.run || S.pending) { setMsg('Finish or discard the bulk batch first.'); return; }
+    if (!sessionOK()) { setMsg('Session values missing – open ⚙ Settings.'); return; }
+    const tokens = [...new Set(text.split(/[\s,;]+/).map(t => t.trim()).filter(Boolean))];
+    if (!tokens.length) { setMsg('Enter one or more case numbers.'); return; }
+    S.cases = { phase: 'looking' }; render();
+    try {
+      const found = [], problems = [];
+      for (const t of tokens) {
+        if (!CASE_RE.test(t)) { problems.push({ token: t, text: 'Case numbers have 9 digits.', msg: `${t}: not a case number` }); continue; }
+        const c = await fetchCaseReady(t, null, w => setMsg(`Case ${t}: waiting for TIPS to finish anonymizing… (${w} s)`));
+        if (!c) { problems.push({ token: t, text: 'Not found, or not visible to your outlet.', msg: `${t}: case not found` }); continue; }
+        const v = c.vehicle || {};
+        found.push({ id: t, ready: true, tips: `Case ${t}`, title: caseTitle(c), status: caseStatus(c), model: v.vehiclemodel || '', vin: v.vin || v.fin || '', atts: (c.attachments || []).length, msgs: caseMessages(c).length, detail: c });
+      }
+      S.cases = { phase: 'looked', found, problems };
+      if (/anonymizing/.test(S.msg || '')) S.msg = '';
+    } catch (e) { S.cases = null; throw e; }
+    render();
+  }
+  async function downloadCases() {
+    const sc = S.cases;
+    if (!sc || sc.phase !== 'looked' || !sc.found.length || S.run || S.pending) return;
+    const { found, problems } = sc;
+    const out = await runDocs(found.length === 1 ? found[0].tips : `${found.length} cases`, found, 'case', exportCase);
+    if (!out) return;
+    const { files, errors, results } = out;
+    if (errors.length || problems.length) files.unshift({ name: `_errors.txt`, data: txt([...problems.map(p => p.msg), ...errors].join('\r\n')) });
+    const blob = makeZip(files), fname = caseZipName(found);
+    saveBlob(blob, fname);
+    const sum = summarize(fname, blob, results, errors);
+    S.cases = { phase: 'done', fname, sum, problems };
+    S.recent.unshift({ kind: 'case', fname, tips: found.map(f => f.tips), cases: found.map(f => f.id), sizeMB: sum.sizeMB, docs: found.length, date: new Date().toISOString() });
     S.recent = S.recent.slice(0, 10);
     await saveRecent();
     railFlash = Date.now() + 6000; setTimeout(render, 6100);
@@ -655,12 +863,13 @@
     let steps = '';
     if (st) {
       const L = [];
-      L.push(gi <= 1 ? ['cur', st.g === 'data' ? 'Topic data' : `Current PDF v${st.v}`] : ['done', 'Topic data &amp; current PDF']);
-      if (run.attN) L.push(gi === 2 ? ['cur', `Attachment ${st.k} of ${st.n}`] : gi > 2 ? ['done', `${run.attN} attachment${run.attN > 1 ? 's' : ''}`] : null);
+      const isCase = run.kind === 'case';
+      L.push(gi <= 1 ? ['cur', isCase ? 'Case details' : st.g === 'data' ? 'Topic data' : `Current PDF v${st.v}`] : ['done', isCase ? 'Case details' : 'Topic data &amp; current PDF']);
+      if (run.attN) L.push(gi === 2 ? ['cur', `${isCase ? 'File' : 'Attachment'} ${st.k} of ${st.n}`] : gi > 2 ? ['done', `${run.attN} ${isCase ? 'file' : 'attachment'}${run.attN > 1 ? 's' : ''}`] : null);
       if (gi === 3) L.push(['cur', `Prior version v${st.k} of ${st.n}`]);
       steps = `<ol class="steps">${L.filter(Boolean).map(([k, t]) => k === 'done' ? `<li class="mut"><span class="okc">✓</span>${t}</li>` : `<li><span class="acc spin">${svg('<circle cx="12" cy="12" r="8" stroke-opacity=".25"></circle><path d="M12 4a8 8 0 0 1 8 8"></path>', 16, 2.4)}</span>${t}</li>`).join('')}</ol>`;
     }
-    return `<div class="sec"><div class="sp"><h3>Downloading</h3><span style="font-size:16px">Document ${Math.min(doneN + 1, run.total)} of ${run.total}</span></div>${pbar(100 * (doneN + frac) / run.total, false, 'pbar')}</div>
+    return `<div class="sec"><div class="sp"><h3>Downloading</h3><span style="font-size:16px">${run.kind === 'case' ? 'Case' : 'Document'} ${Math.min(doneN + 1, run.total)} of ${run.total}</span></div>${pbar(100 * (doneN + frac) / run.total, false, 'pbar')}</div>
       ${run.items.map((it, k) => {
         const r = run.results[k];
         if (r) return `<div class="card"><div class="bd"><div class="sp"><span>${esc(it.tips)}</span>${r.status === 'ok' ? '<span class="okc">✓ done</span>' : '<span class="erc">failed</span>'}</div></div></div>`;
@@ -679,16 +888,51 @@
       + vRecent(sg);
     return { body, actions: '<button class="b pri" id="newdl">New download</button>' };
   }
-  function vRecent(sg) {
-    if (!S.recent.length) return '';
+  function vRecent(sg, kind = 'li') {
+    const list = S.recent.map((r, i) => [r, i]).filter(([r]) => (r.kind || 'li') === kind).slice(0, 5);
+    if (!list.length) return '';
     const blocked = !!(S.run || S.pending);
     return `<div class="sec" style="padding-top:8px"><h3>Recent downloads</h3>
-      ${S.recent.slice(0, 5).map((r, k) => {
+      ${list.map(([r, k], pos) => {
         const name = r.docs === 1 ? r.tips[0] : `${r.docs} documents`;
-        const meta = (r.docs === 1 ? `v${r.v} · ` : `${r.tips.slice(0, 2).join(', ')}${r.docs > 2 ? ' …' : ''} · `) + `${r.sizeMB} MB · ${when(r.date)}`;
-        return `<div class="card${k === 0 && sg && sg.phase === 'done' && sg.fname === r.fname ? ' sel' : ''}"><div class="bd"><span>${esc(name)}</span><span class="mut sm">${esc(meta)}</span></div>
+        const meta = (r.docs === 1 ? (r.kind === 'case' ? '' : `v${r.v} · `) : `${r.tips.slice(0, 2).join(', ')}${r.docs > 2 ? ' …' : ''} · `) + `${r.sizeMB} MB · ${when(r.date)}`;
+        return `<div class="card${pos === 0 && sg && sg.phase === 'done' && sg.fname === r.fname ? ' sel' : ''}"><div class="bd"><span>${esc(name)}</span><span class="mut sm">${esc(meta)}</span></div>
           <button class="b bar" style="width:40px;padding:0" data-redo="${k}" aria-label="Download ${esc(name)} again" title="Look up again" ${blocked ? 'disabled' : ''}>${I.redo}</button></div>`;
       }).join('')}</div>`;
+  }
+
+  // ---- cases
+  function vCases() {
+    const sc = S.cases, run = S.run && S.run.kind === 'case' ? S.run : null, blocked = !!(S.run || S.pending);
+    if (run) return { body: `<div id="runbox">${vSingleRun(run)}</div>`, actions: `<button class="b dan" id="cancel">${I.x}Cancel download</button>` };
+    if (sc && sc.phase === 'done') {
+      const m = sc.sum, np = sc.problems.length;
+      return { body: banner('ok', 'Saved to Downloads', `<span class="mut" style="overflow-wrap:anywhere">${esc(sc.fname)}</span>`)
+        + kv([['Size', `${m.sizeMB} MB`], ['Cases', `${m.ok} of ${m.docs}`], ['Uploaded files', m.att]])
+        + (m.errors.length ? banner('er', `${m.errors.length} file${m.errors.length > 1 ? 's' : ''} could not be saved`, `<details><summary>Show details</summary><pre>${esc(m.errors.join('\n'))}</pre></details><span class="mut sm">Also listed in _errors.txt inside the zip.</span>`) : '')
+        + (np ? banner('al', `${np} entr${np > 1 ? 'ies' : 'y'} skipped`, sc.problems.map(p => `<span>${esc(p.token)} – ${esc(p.text)}</span>`).join(''), '<button class="b bar sm" id="cfix" style="align-self:center">Fix</button>') : '')
+        + vRecent(sc, 'case'),
+        actions: '<button class="b pri" id="cnew">New download</button>' };
+    }
+    const looking = sc && sc.phase === 'looking', looked = sc && sc.phase === 'looked';
+    let body = `<div class="sec"><h3>Download cases</h3>
+        <textarea id="cs" rows="3" aria-label="Case numbers" placeholder="246932285&#10;246936253, 246934413 …" ${blocked || looking ? 'disabled' : ''}>${esc(caseText)}</textarea>
+        ${looked ? '' : '<span class="mut">Case numbers have 9 digits – it’s the Case number in an open case. Separate several with spaces, commas or new lines. Ctrl+Enter looks them up.</span>'}</div>`;
+    if (looked) {
+      const n = sc.found.length + sc.problems.length;
+      body += `<div class="cnt">Found in TIPS : <span class="badge">${sc.found.length}</span><span class="mut" style="font-size:14px">of ${n} entr${n === 1 ? 'y' : 'ies'}</span></div>
+        ${sc.found.map(f => `<div class="card"><span class="okc ic">${svg('<path d="M20 6L9 17l-5-5"></path>', 20, 2.2)}</span><div class="bd">
+          <div class="sp"><span>Case ${esc(f.id)}</span><span class="mut sm">${esc(f.status)}</span></div><span>${esc(f.title)}</span>
+          <span class="mut sm">${esc([f.model, f.vin ? 'VIN …' + f.vin.slice(-6) : '', `${f.atts} file${f.atts === 1 ? '' : 's'}`, `${f.msgs} message${f.msgs === 1 ? '' : 's'}`].filter(Boolean).join(' · '))}</span></div></div>`).join('')}
+        ${sc.problems.map(p => banner('al', esc(p.token), `<span>${esc(p.text)}</span>`)).join('')}
+        ${sc.found.length ? `<span class="mut sm">Saves as ${esc(caseZipName(sc.found))}</span>` : ''}`;
+    } else body += '<span class="mut">Each case is saved as a readable report (vehicle, fault codes, summary, complaint, measures and the message history as TIPS shows it) plus every file uploaded to the case.</span>'
+      + (blocked ? '<span class="alc">A download or bulk batch is running – wait for it to finish.</span>' : '');
+    body += vRecent(sc, 'case');
+    const actions = looked
+      ? `<button class="b bar" id="cclear">Clear</button><button class="b pri" id="cdl" ${sc.found.length ? '' : 'disabled'}>${I.dl}Download ${sc.found.length || ''}</button>`
+      : `<button class="b pri" id="clook" ${blocked || looking ? 'disabled' : ''}>${I.search}${looking ? 'Looking up…' : 'Look up'}</button>`;
+    return { body, actions };
   }
 
   // ---- bulk
@@ -709,7 +953,7 @@
         <span class="mut">Nothing downloads until you approve the batch. Cancel discards it; its documents stay pending.</span>` + toggles;
       actions = `<button class="b dan" id="cancel">Cancel batch</button><button class="b sec" id="pause">${run.paused ? I.play + 'Resume' : I.pause + 'Pause'}</button>`;
     } else if (S.run) {
-      body += `<div class="card sel"><div class="bd"><b>A single-LI download is running</b><span class="mut" id="plabel">${esc(runLabel(S.run))}</span></div></div>`;
+      body += `<div class="card sel"><div class="bd"><b>A download is running</b><span class="mut" id="plabel">${esc(runLabel(S.run))}</span></div></div>`;
       actions = `<button class="b dan" id="cancel">${I.x}Cancel download</button>`;
     } else if (pen) {
       const m = pen.summary;
@@ -763,7 +1007,7 @@
   }
 
   function checkSetup() {
-    const s = S.settings, nav = document.querySelector('xy-c-side-navigation'), topic = /\/search\/topics\/\d+\/\d+/.test(location.pathname);
+    const s = S.settings, nav = document.querySelector('xy-c-side-navigation'), topic = /\/search\/(topics\/\d+\/\d+|cases\/\d{9})/.test(location.pathname);
     const fontOk = (() => { try { return [...document.fonts].some(f => /Corpo S Text Regular|XF CorpoS/i.test(f.family) && f.status === 'loaded'); } catch (e) { return null; } })();
     const cv = (navigator.userAgent.match(/Chrome\/(\d+)/) || [])[1];
     return [
@@ -771,10 +1015,12 @@
       [s.pageSizeSrc === 'default' ? false : true, 'Search page size', s.pageSizeSrc === 'detected' ? `${s.pageSize} – matches TIPS` : s.pageSizeSrc === 'manual' ? `${s.pageSize} – set manually` : 'not seen yet – run any search in TIPS'],
       [!!nav, 'Drawer position', nav ? `under the header (${topOffset()} px)` : 'header not found – using 56 px'],
       [!!(document.getElementById('auxMenu0') || document.querySelector('footer xy-c-aux-menu')), '⋮ menu', document.getElementById('auxMenu0') ? 'found – TIPS Exporter is added under Settings' : 'not found – use the toolbar icon to open the exporter'],
-      [topic ? !!document.querySelector('neo-topic-detail button.xy-i-print') : null, 'Topic toolbar button', topic ? (document.querySelector('button.tipsx-dl') ? 'shown next to Print' : 'Print button not found') : 'open a topic to check'],
+      [topic ? !!document.querySelector('neo-topic-detail button.xy-i-print, neo-case-detail button.xy-i-print') : null, 'Toolbar button', topic ? (document.querySelector('button.tipsx-dl') ? 'shown next to Print' : 'Print button not found') : 'open a topic or case to check'],
       [fontOk, 'TIPS fonts', fontOk ? 'in use' : fontOk === false ? 'not loaded – using Arial/Georgia' : 'could not check'],
       [S.index.length ? true : null, 'Index', S.index.length ? `${fmtN(S.index.length)} topics, ${fmtN(doneCount())} exported` : 'not built (only needed for bulk export and short LI endings)'],
       [cv ? +cv >= 111 : null, 'Chrome', cv ? `version ${cv}` : 'unknown'],
+      [lastCaseSource() ? true : null, 'Open case source', lastCaseSource() ? lastCaseSource().path.replace(/\d{4,}/g, m => '#'.repeat(m.length)).replace(/(uid|user)=[^&]*/gi, '$1=…') : 'open a case to check'],
+      [null, 'Recent case requests', (() => { try { const l = JSON.parse(document.documentElement.dataset.tipsxCaseLog || '[]'); return l.length ? l.map(x => x.replace(/\d{4,}/g, m => '#'.repeat(m.length)).replace(/(uid|user)=[^&]*/gi, '$1=…')).join('  |  ') : 'none yet – open a case'; } catch (e) { return 'none'; } })()],
       [true, 'Extension', `v${EXT_VERSION}`]];
   }
 
@@ -782,18 +1028,18 @@
     syncRail();
     if (!visible) { root.innerHTML = ''; syncToolbar(); return; }
     // keep typing focus and scroll position across re-renders
-    const ae = root.activeElement, focusLi = ae && ae.id === 'li', selA = focusLi ? ae.selectionStart : 0, selB = focusLi ? ae.selectionEnd : 0;
+    const ae = root.activeElement, focusLi = ae && (ae.id === 'li' || ae.id === 'cs'), focusId = focusLi ? ae.id : '', selA = focusLi ? ae.selectionStart : 0, selB = focusLi ? ae.selectionEnd : 0;
     const oldBody = root.querySelector('.body'), scroll = oldBody && lastView === view ? oldBody.scrollTop : 0; lastView = view;
     const s = S.settings, run = S.run, T = topOffset();
-    const status = run ? (run.kind === 'single' ? '<span class="st acc">● Downloading</span>' : run.paused ? `<span class="st alc">● ${esc(run.title)} paused</span>` : `<span class="st acc">● ${esc(run.title)} running</span>`)
-      : S.pending ? '<span class="st okc">● Awaiting approval</span>' : view === 'single' && S.single && S.single.phase === 'done' ? '<span class="st okc">● Saved</span>' : '';
-    const v = showSettings ? vSettings() : view === 'bulk' ? vBulk() : vSingle();
+    const status = run ? (run.kind !== 'bulk' ? '<span class="st acc">● Downloading</span>' : run.paused ? `<span class="st alc">● ${esc(run.title)} paused</span>` : `<span class="st acc">● ${esc(run.title)} running</span>`)
+      : S.pending ? '<span class="st okc">● Awaiting approval</span>' : (view === 'single' && S.single && S.single.phase === 'done') || (view === 'cases' && S.cases && S.cases.phase === 'done') ? '<span class="st okc">● Saved</span>' : '';
+    const v = showSettings ? vSettings() : view === 'bulk' ? vBulk() : view === 'cases' ? vCases() : vSingle();
     root.innerHTML = `<style>${css}</style><div class="dim" id="dim" style="top:${T}px"></div>
       <aside class="dr${justOpened ? ' anim' : ''}" role="dialog" aria-modal="true" aria-label="TIPS Exporter" style="top:${T}px">
         <div class="hd"><div class="ttl"><h2>TIPS Exporter</h2>${status}</div>
           <div class="hb"><button class="ib" id="gear" aria-label="Settings" aria-pressed="${showSettings}">${svg('<circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>', 22, 1.5)}</button>
             <span class="sep"></span><button class="ib" id="close" aria-label="Close">${svg('<path d="M18 6L6 18"></path><path d="M6 6l12 12"></path>', 22, 1.5)}</button></div></div>
-        <div class="tabs" role="tablist"><button class="tab" role="tab" id="tosingle" aria-selected="${view === 'single'}">Single LI</button><button class="tab" role="tab" id="tobulk" aria-selected="${view === 'bulk'}">Bulk export</button></div>
+        <div class="tabs" role="tablist"><button class="tab" role="tab" id="tosingle" aria-selected="${view === 'single'}">Single LI</button><button class="tab" role="tab" id="tocases" aria-selected="${view === 'cases'}">Cases</button><button class="tab" role="tab" id="tobulk" aria-selected="${view === 'bulk'}">Bulk export</button></div>
         ${S.msg ? `<div class="note" role="status"><span>${esc(S.msg)}</span><button id="msgx" aria-label="Dismiss message">×</button></div>` : ''}
         <div class="body" id="body">${v.body}</div>
         <div class="ft"><span class="sess">${sessionOK() ? `<span class="okc" style="display:flex">${svg('<path d="M20 6L9 17l-5-5"></path>', 16, 2.4)}</span>Session OK · ${esc(s.user)}` : `<span class="alc" style="display:flex">${svg('<path d="M12 9v4"></path><path d="M12 17h.01"></path><path d="M10.3 3.9L1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"></path>', 16, 2)}</span>Session not detected – open any topic once, or check ⚙`}</span>
@@ -811,6 +1057,7 @@
     on('msgx', 'onclick', () => { S.msg = ''; render(); });
     on('tobulk', 'onclick', () => { view = 'bulk'; showSettings = false; render(); });
     on('tosingle', 'onclick', () => { view = 'single'; showSettings = false; render(); });
+    on('tocases', 'onclick', () => { view = 'cases'; showSettings = false; render(); });
 
     // single LI
     const lookup = safeRun(() => lookupSpecific(liText));
@@ -822,7 +1069,21 @@
     on('clear', 'onclick', () => { liText = ''; S.single = null; render(); focusBox(); });
     on('newdl', 'onclick', () => { liText = ''; S.single = null; render(); focusBox(); });
     on('fix', 'onclick', () => { liText = S.single.problems.map(p => p.token).join('\n'); S.single = null; render(); focusBox(); });
-    root.querySelectorAll('[data-redo]').forEach(b => b.onclick = () => { const r = S.recent[+b.dataset.redo]; if (!r) return; liText = r.tips.join('\n'); S.single = null; lookup(); });
+    root.querySelectorAll('[data-redo]').forEach(b => b.onclick = () => {
+      const r = S.recent[+b.dataset.redo]; if (!r) return;
+      if (r.kind === 'case') { caseText = r.cases.join('\n'); S.cases = null; clook(); } else { liText = r.tips.join('\n'); S.single = null; lookup(); }
+    });
+
+    // cases
+    const clook = safeRun(() => lookupCases(caseText));
+    const focusCs = () => { const t = $('cs'); if (t) { t.focus(); t.selectionStart = t.selectionEnd = t.value.length; } };
+    on('cs', 'oninput', e => { caseText = e.target.value; if (S.cases && S.cases.phase === 'looked') { S.cases = null; render(); } });
+    on('cs', 'onkeydown', e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); clook(); } });
+    on('clook', 'onclick', clook);
+    on('cdl', 'onclick', safeRun(downloadCases));
+    on('cclear', 'onclick', () => { caseText = ''; S.cases = null; render(); focusCs(); });
+    on('cnew', 'onclick', () => { caseText = ''; S.cases = null; render(); focusCs(); });
+    on('cfix', 'onclick', () => { caseText = S.cases.problems.map(p => p.token).join('\n'); S.cases = null; render(); focusCs(); });
 
     // run controls
     on('pause', 'onclick', () => { S.run.paused = !S.run.paused; render(); });
@@ -873,10 +1134,10 @@
       sDraft = {}; await saveSettings(); render();
     });
 
-    if (focusLi && $('li') && !$('li').disabled) { $('li').focus(); $('li').setSelectionRange(selA, selB); }
+    if (focusLi && $(focusId) && !$(focusId).disabled) { $(focusId).focus(); $(focusId).setSelectionRange(selA, selB); }
     if (showSettings) for (const id of S_FIELDS) { const el = $(id); if (!el) continue; if (id in sDraft) el.value = sDraft[id]; el.addEventListener('input', () => { sDraft[id] = el.value; }); }
     root.querySelector('.body').scrollTop = scroll;
-    if (focusOnOpen) { const t = $('li') && !$('li').disabled ? $('li') : root.querySelector('.dr ' + FOCUSABLE.split(',').join(',.dr ')); if (t) t.focus(); }
+    if (focusOnOpen) { const t = ['li', 'cs'].map($).find(x => x && !x.disabled) || root.querySelector('.dr ' + FOCUSABLE.split(',').join(',.dr ')); if (t) t.focus(); }
     syncToolbar();
   }
   const cancelRun = () => { if (S.run) { S.run.cancel = true; S.run.paused = false; } };
@@ -897,7 +1158,7 @@
   // The menu (nav#auxMenu0-panel) is a CDK overlay rebuilt on every open; our item is re-added each time.
   const MENU_ICON = '<path d="M12 3v12"></path><path d="M7 10l5 5 5-5"></path><path d="M5 21h14"></path>';
   function menuStatus() {
-    if (S.run && S.run.kind === 'single') return `${Math.min(S.run.results.length + 1, S.run.total)} of ${S.run.total}…`;
+    if (S.run && S.run.kind !== 'bulk') return `${Math.min(S.run.results.length + 1, S.run.total)} of ${S.run.total}…`;
     if (S.run) return `${S.run.title} · ${S.run.i}/${S.run.total}`;
     if (S.pending) return 'Ready to approve';
     if (Date.now() < railFlash) return '✓ Saved';
@@ -972,7 +1233,22 @@
   };
 
   let otCache = { key: '', val: null }, idxById = { n: -1, map: null };
+  const CASE_ROUTE_RE = /\/cases\/([^/?#]+)/;
+  function lastCaseSource() {   // the last single-case request the Reader made (recorded by the page probe)
+    const path = document.documentElement.dataset.tipsxCaseUrl;
+    if (!path) return null;
+    const m = new URL(path, location.href).pathname.match(/\/([A-Za-z0-9_-]*\d[A-Za-z0-9_-]{3,})\/?$/);
+    return m ? { path, id: m[1] } : null;
+  }
   function openTopic() {
+    // A case is open when the address has /cases/<id> or the Reader shows its case dialog (external cases included).
+    const cm = location.pathname.match(CASE_ROUTE_RE), dlg = document.querySelector('neo-case-detail');
+    if (cm || dlg) {
+      const fromDom = dlg && dlg.querySelector('.casedetail-id span:nth-child(2)');
+      const src = lastCaseSource();
+      const id = (fromDom && fromDom.textContent.trim()) || (cm && decodeURIComponent(cm[1])) || (src && src.id) || null;
+      return { kind: 'case', id, path: src && src.id === id ? src.path : null, external: !!(dlg && /external case/i.test(dlg.textContent)) };
+    }
     const m = location.pathname.match(ROUTE_RE); if (!m) return null;
     const tipsId = m[1], version = +m[2], key = location.pathname + '|' + S.index.length;
     if (otCache.key === key && otCache.val) return otCache.val;   // cheap on repeat calls while the same topic is open
@@ -990,9 +1266,11 @@
     return val;
   }
   function tipHtml() {
-    if (tb.state === 'busy') return `Downloading${S.run && S.run.kind === 'single' ? ' – ' + esc(runLabel(S.run)) : '…'}<small>TIPS Exporter</small>`;
+    if (tb.state === 'busy' && tb.msg) return `${esc(tb.msg)}<small>TIPS Exporter</small>`;
+    if (tb.state === 'busy') return `Downloading${S.run && S.run.kind !== 'bulk' ? ' – ' + esc(runLabel(S.run)) : '…'}<small>TIPS Exporter</small>`;
     if (tb.state !== 'idle') return `${esc(tb.msg)}<small>TIPS Exporter</small>`;
     const t = openTopic();
+    if (t && t.kind === 'case') return `Download ${t.id ? 'case ' + esc(t.id) : 'this case'}: readable report + every uploaded file<small>TIPS Exporter</small>`;
     if (!t) return 'Download this topic with all versions<small>TIPS Exporter</small>';
     const prior = Math.max(0, t.version - 1);
     return `Download ${esc(t.tips)} with ${prior ? `all ${prior} prior version${prior > 1 ? 's' : ''}, ` : ''}attachments and links<small>TIPS Exporter</small>`;
@@ -1019,6 +1297,7 @@
     if (S.pending || (S.run && S.run.kind === 'bulk')) return settle('error', 'A bulk batch is running or waiting for approval – finish or discard it first.', 6000);
     if (S.run || (S.single && S.single.phase === 'looking')) return settle('error', 'Another download is running – wait for it to finish.', 6000);
     if (!sessionOK()) return settle('error', 'Session not detected – open the panel and check ⚙ Settings.', 6000);
+    if (t.kind === 'case') return t.id ? downloadOpenCase(t.id, settle, t.external, t.path) : settle('error', "Couldn't tell which case is open. Close the case and open it again, then retry – or use the Cases tab.", 6000);
     // Keep a list the user looked up in the panel; it comes back after this download.
     const keep = S.single && S.single.phase === 'looked' ? { single: S.single, liText } : null;
     const restore = () => { if (keep) { S.single = keep.single; liText = keep.liText; } };
@@ -1039,6 +1318,27 @@
     } catch (e) { S.single = null; restore(); settle('error', e.message, 6000); }
     render();
   }
+  async function downloadOpenCase(id, settle, external, path) {
+    if (S.cases && S.cases.phase === 'looking') return settle('error', 'Another lookup is running – wait for it to finish.', 6000);
+    const keep = S.cases && S.cases.phase === 'looked' ? { cases: S.cases, caseText } : null;
+    const restore = () => { if (keep) { S.cases = keep.cases; caseText = keep.caseText; } };
+    tb.state = 'busy'; tb.msg = ''; S.cases = { phase: 'looking' }; syncToolbar(); render();
+    const msg0 = S.msg;
+    try {
+      const c = await fetchCaseReady(id, path, w => { tb.msg = `Waiting for TIPS to finish anonymizing this case… (${w} s)`; syncToolbar(); }, caseFromDom);
+      tb.msg = '';
+      if (!c) { S.cases = null; restore(); return settle('error', external ? `This external case (${id}) couldn't be loaded – external cases aren't supported yet.` : `Case ${id} couldn't be loaded.`, 6000); }
+      if (S.run || S.pending) { S.cases = null; restore(); return settle('error', 'Another download started – try again when it finishes.', 6000); }
+      S.cases = { phase: 'looked', found: [{ id, path, ready: true, tips: `Case ${id}`, title: caseTitle(c), status: caseStatus(c), model: (c.vehicle || {}).vehiclemodel || '', vin: (c.vehicle || {}).vin || '', atts: (c.attachments || []).length, msgs: caseMessages(c).length, detail: c }], problems: [] };
+      await downloadCases();
+      if (S.cases && S.cases.phase === 'done') {
+        const m = S.cases.sum, fname = S.cases.fname;
+        settle('done', `Saved ${fname} (${m.sizeMB} MB)${m.errors.length ? ` – ${m.errors.length} file(s) could not be saved, see _errors.txt in the zip` : ''}`, 5000);
+        if (keep) restore();
+      } else { restore(); settle('error', S.msg !== msg0 && S.msg ? S.msg : 'Download stopped – nothing saved.', 6000); }
+    } catch (e) { S.cases = null; restore(); settle('error', e.message, 6000); }
+    render();
+  }
   function injectToolbar() {
     injectQueued = false;
     if (!document.getElementById('tipsx-page-css')) {
@@ -1046,7 +1346,7 @@
       (document.head || document.documentElement).appendChild(st);
     }
     let added = false;
-    for (const print of document.querySelectorAll('neo-topic-detail button.xy-i-print')) {
+    for (const print of document.querySelectorAll('neo-topic-detail button.xy-i-print, neo-case-detail button.xy-i-print')) {
       const anchor = print.closest('xy-c-spinner') || print.parentElement;
       if (!anchor || !anchor.parentElement || anchor.parentElement.querySelector(':scope > .tipsx-dlwrap')) continue;
       const r = print.getBoundingClientRect(), w = Math.round(r.width) || 40, h = Math.round(r.height) || w;
@@ -1054,7 +1354,7 @@
       const b = document.createElement('button');
       b.type = 'button'; b.className = 'tipsx-dl'; b.style.width = w + 'px'; b.style.height = h + 'px';
       b.dataset.icon = Math.round(Math.min(w, h) * .6);
-      b.setAttribute('aria-label', 'Download this topic with all versions (TIPS Exporter)');
+      b.setAttribute('aria-label', print.closest('neo-case-detail') ? 'Download this case: report and uploaded files (TIPS Exporter)' : 'Download this topic with all versions (TIPS Exporter)');
       b.style.setProperty('--tipsx-fg', getComputedStyle(print).color);
       const tip = document.createElement('div'); tip.className = 'tipsx-tip'; tip.setAttribute('role', 'tooltip');
       wrap.append(b, tip);
