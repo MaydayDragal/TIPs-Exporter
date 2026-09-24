@@ -4,14 +4,14 @@ TIPS Exporter downloads XENTRY TIPS Reader topics: the specific LI documents you
 
 ## Install
 
-1. Download `TIPS-Exporter-vX.Y.Z.zip` from the [latest release](https://github.com/MaydayDragal/TIPs-Exporter/releases/latest) and unzip it into a folder you'll keep, for example `Documents\TIPS Exporter`.
+1. Download `TIPS-Exporter-vX.Y.Z.zip` from the [latest release](https://github.com/MaydayDragal/TIPs-Exporter/releases/latest) and unzip it somewhere you'll keep it, for example `Documents`. It contains a `TIPS-Exporter` folder.
 2. In Chrome, open `chrome://extensions` and switch on **Developer mode** (top right).
-3. Click **Load unpacked** and select that folder.
+3. Click **Load unpacked** and select the `TIPS-Exporter` folder.
 4. Optional: pin the extension to the toolbar (puzzle icon, then the pin).
 
 Needs Chrome 111 or newer.
 
-**Updating:** unzip the new release over the same folder, click the reload icon on TIPS Exporter in `chrome://extensions`, and reload the TIPS tab. Your settings, progress and recent downloads are kept.
+**Updating:** unzip the new release to the same place (replacing the files), click the reload icon on TIPS Exporter in `chrome://extensions`, and reload the TIPS tab. Your settings, progress and recent downloads are kept.
 
 ## Opening and closing
 
