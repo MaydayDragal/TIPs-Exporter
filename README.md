@@ -9,6 +9,8 @@ This extension downloads XENTRY TIPS Reader topics, either the specific LI docum
 3. Click **Load unpacked** and select that folder.
 4. Pin the extension to the toolbar (puzzle icon, then the pin).
 
+Needs Chrome 111 or newer.
+
 ## Continue where you left off (batches 1–3 already done)
 
 1. Log into XENTRY and open **TIPS Reader**. Open the **⋮** menu at the bottom of the left rail and choose **TIPS Exporter** (or click the extension's toolbar icon). The exporter opens as a drawer on the right, like a TIPS topic.
@@ -86,6 +88,19 @@ Progress is stored in the extension's own storage (`chrome.storage.local`), so c
 
 ## Troubleshooting
 
-- **The button doesn't appear:** reload the TIPS Reader tab, or click the toolbar icon.
+- **Something doesn't seem to work:** open the exporter, click **⚙**, then **Check setup**. It lists what the exporter found on the page (session, search page size, header, ⋮ menu, topic toolbar, TIPS fonts, Chrome version) and what to do about anything marked ✗.
+- **TIPS Exporter isn't in the ⋮ menu, or the toolbar button doesn't appear:** reload the TIPS Reader tab, or click the extension's toolbar icon.
 - **Every request fails after a XENTRY update:** set the new Reader version in ⚙. It's the `vX.Y.Z` shown at the top right of TIPS.
 - **Chrome asks "Allow multiple downloads?":** click Allow for xentry.mercedes-benz.com.
+
+## Checking a new version
+
+After installing an update, reload the extension in `chrome://extensions`, reload the TIPS tab, and check:
+
+1. **⋮ → TIPS Exporter** opens the drawer and the ⋮ menu closes.
+2. **⚙ → Check setup** shows ✓ for Session, Drawer position, ⋮ menu and TIPS fonts.
+3. Open a topic: the download button appears next to **Print**; clicking it saves `TIPS_<LI>.zip` for that topic, and the ⋮ button shows the green badge.
+4. In **Single LI**, look up two LI numbers and download them; the zip has both folders.
+5. In **Bulk export**, set the batch size to 2 under ⚙, prepare a batch, approve it, and check the progress log updates.
+6. Reload TIPS: your settings and progress are still there.
+

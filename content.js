@@ -52,7 +52,9 @@
     }
     detectSession();
     notePageSize(+document.documentElement.dataset.tipsxPageSize);
+    delete S.settings.pos;   // left over from the floating panel (≤1.5)
     loaded = true;
+    if (hasChrome && (await store.get('openOnLoad', 0)) > Date.now() - 60000) { await store.set('openOnLoad', 0); setTimeout(() => openDrawer(true), 300); }   // toolbar icon reloaded this tab
   }
   const saveIndex = () => store.set('index', S.index);
   const saveDone = () => store.set('done', S.done);
@@ -477,6 +479,9 @@
   let visible = false, justOpened = false, showSettings = false, liText = '', view = 'single';   // view: 'single' | 'bulk'
   let railFlash = 0, lastView = 'single';
   let sDraft = {};   // unsaved Settings edits, kept across re-renders until Save / close / Re-detect
+  const EXT_VERSION = (hasChrome && chrome.runtime && chrome.runtime.getManifest && chrome.runtime.getManifest().version) || 'dev';
+  const HELP_URL = 'https://github.com/MaydayDragal/TIPs-Exporter#readme';
+  let diag = null;   // results of "Check setup"
   const S_FIELDS = ['s_bs', 's_delay', 's_delay2', 's_ps', 's_outlet', 's_user', 's_ver'];
   const css = `
   :host{all:initial}
@@ -558,8 +563,30 @@
   function topOffset() { const n = document.querySelector('xy-c-side-navigation'); const t = n ? Math.round(n.getBoundingClientRect().top) : 56; return t > 0 && t < 200 ? t : 56; }
   window.addEventListener('resize', () => { if (visible) render(); });
   // Esc closes the drawer (and doesn't reach the Reader while the drawer is open)
-  window.addEventListener('keydown', e => { if (visible && e.key === 'Escape' && e.isTrusted) { e.stopPropagation(); e.preventDefault(); openDrawer(false); } }, true);
-  function openDrawer(open) { if (open && !visible) justOpened = true; visible = open; if (!open) { showSettings = false; sDraft = {}; } render(); }
+  const FOCUSABLE = 'button:not([disabled]),textarea:not([disabled]),input:not([disabled]),select:not([disabled]),summary,a[href],[tabindex]:not([tabindex="-1"])';
+  window.addEventListener('keydown', e => {
+    if (!visible || !e.isTrusted) return;
+    if (e.key === 'Escape') { e.stopPropagation(); e.preventDefault(); openDrawer(false); return; }
+    if (e.key === 'Tab') {   // keep keyboard focus inside the drawer, like the Reader's dialogs
+      const f = [...root.querySelectorAll('.dr ' + FOCUSABLE.split(',').join(',.dr '))].filter(el => el.offsetParent !== null || el.getClientRects().length);
+      if (!f.length) return;
+      const i = f.indexOf(root.activeElement);
+      if (e.shiftKey && i <= 0) { e.preventDefault(); f[f.length - 1].focus(); }
+      else if (!e.shiftKey && (i === -1 || i === f.length - 1)) { e.preventDefault(); f[0].focus(); }
+    }
+  }, true);
+  let returnFocus = null;
+  function openDrawer(open) {
+    if (open && !visible) { justOpened = true; returnFocus = document.activeElement; }
+    const wasVisible = visible;
+    visible = open;
+    if (!open) { showSettings = false; sDraft = {}; }
+    render();
+    if (!open && wasVisible) {   // back to the ⋮ button (the menu item that opened us is gone by now)
+      const t = document.querySelector('#auxMenu0 button') || (returnFocus && returnFocus.isConnected ? returnFocus : null);
+      if (t && t.focus) t.focus();
+    }
+  }
 
   const svg = (d, w = 18, sw = 2) => `<svg width="${w}" height="${w}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="${sw}" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${d}</svg>`;
   const I = {
@@ -667,7 +694,7 @@
   // ---- bulk
   function vBulk() {
     const s = S.settings, run = S.run && S.run.kind === 'bulk' ? S.run : null, pen = S.pending, dc = doneCount(), nb = nextBatch(), pendN = pendingItems().length;
-    const busy = !!S.run, pct = S.index.length ? 100 * dc / S.index.length : 0;
+    const pct = S.index.length ? 100 * dc / S.index.length : 0;
     let body = `<div class="sec"><h3>Progress</h3>
         <div class="cnt">Total topics : <span class="badge">${S.index.length ? fmtN(S.index.length) : '0'}</span></div>
         <div style="display:flex;gap:24px;flex-wrap:wrap"><span>Exported : <b>${fmtN(dc)}</b></span><span>Pending : <b>${fmtN(pendN)}</b></span><span>Next batch : <b>${nb ?? '–'}</b></span></div>
@@ -702,7 +729,6 @@
           ${S.history.slice().reverse().map(x => `<tr><td>${x.n}</td><td>${x.sizeMB} MB</td><td>${x.ok}/${x.docs}</td><td>${x.att}</td><td>${x.prev}</td><td>${x.errors}</td></tr>`).join('')}</table></details>`;
       actions = `<button class="b pri" id="prep" ${!S.index.length || !nb ? 'disabled' : ''}>${I.dl}${nb ? `Prepare batch ${nb} · ${Math.min(s.batchSize, pendN)} documents` : S.index.length ? 'Everything exported' : 'Build the index first'}</button>`;
     }
-    if (busy && !run && !S.run) actions = '';
     return { body, actions };
   }
 
@@ -727,8 +753,29 @@
         </div>
         <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="b bar sm" id="f_all">All</button><button class="b bar sm" id="f_csv">CSV only</button><button class="b bar sm" id="f_json">JSON only</button><button class="b bar sm" id="f_none">None</button></div>
         ${!s.files.attCsv ? '<span class="alc sm">Links to other LIs are only recorded in the links list CSV.</span>' : ''}
+      </div>
+      <div class="sec" style="padding-top:12px;border-top:1px solid var(--div)"><b>Check setup</b>
+        <span class="mut">Checks that the exporter can find everything it needs on this TIPS page.</span>
+        ${diag ? `<div class="kv">${diag.map(([ok, a, b]) => `<div><span>${ok === true ? '<span class="okc">✓</span>' : ok === false ? '<span class="erc">✗</span>' : '<span class="mut">–</span>'} ${esc(a)}</span><span>${esc(b)}</span></div>`).join('')}</div>` : ''}
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center"><button class="b bar sm" id="s_check">Check setup</button><a class="sm" href="${HELP_URL}" target="_blank" rel="noopener" style="color:var(--blue)">Help &amp; instructions</a></div>
       </div>`;
     return { body, actions: '<button class="b bar" id="s_detect">Re-detect session</button><button class="b pri" id="s_save">Save</button>' };
+  }
+
+  function checkSetup() {
+    const s = S.settings, nav = document.querySelector('xy-c-side-navigation'), topic = /\/search\/topics\/\d+\/\d+/.test(location.pathname);
+    const fontOk = (() => { try { return [...document.fonts].some(f => /Corpo S Text Regular|XF CorpoS/i.test(f.family) && f.status === 'loaded'); } catch (e) { return null; } })();
+    const cv = (navigator.userAgent.match(/Chrome\/(\d+)/) || [])[1];
+    return [
+      [sessionOK(), 'Session', sessionOK() ? `user ${s.user} · outlet ${s.outlet} · Reader v${s.ver}` : 'not detected – open any topic, then Re-detect session'],
+      [s.pageSizeSrc === 'default' ? false : true, 'Search page size', s.pageSizeSrc === 'detected' ? `${s.pageSize} – matches TIPS` : s.pageSizeSrc === 'manual' ? `${s.pageSize} – set manually` : 'not seen yet – run any search in TIPS'],
+      [!!nav, 'Drawer position', nav ? `under the header (${topOffset()} px)` : 'header not found – using 56 px'],
+      [!!(document.getElementById('auxMenu0') || document.querySelector('footer xy-c-aux-menu')), '⋮ menu', document.getElementById('auxMenu0') ? 'found – TIPS Exporter is added under Settings' : 'not found – use the toolbar icon to open the exporter'],
+      [topic ? !!document.querySelector('neo-topic-detail button.xy-i-print') : null, 'Topic toolbar button', topic ? (document.querySelector('button.tipsx-dl') ? 'shown next to Print' : 'Print button not found') : 'open a topic to check'],
+      [fontOk, 'TIPS fonts', fontOk ? 'in use' : fontOk === false ? 'not loaded – using Arial/Georgia' : 'could not check'],
+      [S.index.length ? true : null, 'Index', S.index.length ? `${fmtN(S.index.length)} topics, ${fmtN(doneCount())} exported` : 'not built (only needed for bulk export and short LI endings)'],
+      [cv ? +cv >= 111 : null, 'Chrome', cv ? `version ${cv}` : 'unknown'],
+      [true, 'Extension', `v${EXT_VERSION}`]];
   }
 
   function render() {
@@ -742,7 +789,7 @@
       : S.pending ? '<span class="st okc">● Awaiting approval</span>' : view === 'single' && S.single && S.single.phase === 'done' ? '<span class="st okc">● Saved</span>' : '';
     const v = showSettings ? vSettings() : view === 'bulk' ? vBulk() : vSingle();
     root.innerHTML = `<style>${css}</style><div class="dim" id="dim" style="top:${T}px"></div>
-      <aside class="dr${justOpened ? ' anim' : ''}" role="dialog" aria-label="TIPS Exporter" style="top:${T}px">
+      <aside class="dr${justOpened ? ' anim' : ''}" role="dialog" aria-modal="true" aria-label="TIPS Exporter" style="top:${T}px">
         <div class="hd"><div class="ttl"><h2>TIPS Exporter</h2>${status}</div>
           <div class="hb"><button class="ib" id="gear" aria-label="Settings" aria-pressed="${showSettings}">${svg('<circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>', 22, 1.5)}</button>
             <span class="sep"></span><button class="ib" id="close" aria-label="Close">${svg('<path d="M18 6L6 18"></path><path d="M6 6l12 12"></path>', 22, 1.5)}</button></div></div>
@@ -750,9 +797,10 @@
         ${S.msg ? `<div class="note" role="status"><span>${esc(S.msg)}</span><button id="msgx" aria-label="Dismiss message">×</button></div>` : ''}
         <div class="body" id="body">${v.body}</div>
         <div class="ft"><span class="sess">${sessionOK() ? `<span class="okc" style="display:flex">${svg('<path d="M20 6L9 17l-5-5"></path>', 16, 2.4)}</span>Session OK · ${esc(s.user)}` : `<span class="alc" style="display:flex">${svg('<path d="M12 9v4"></path><path d="M12 17h.01"></path><path d="M10.3 3.9L1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"></path>', 16, 2)}</span>Session not detected – open any topic once, or check ⚙`}</span>
+<span class="mut sm">v${esc(EXT_VERSION)}</span>
           <div class="acts">${v.actions}</div></div>
       </aside>`;
-    justOpened = false;
+    const focusOnOpen = justOpened; justOpened = false;
     const $ = id => root.getElementById(id);
     const on = (id, ev, fn) => { const el = $(id); if (el) el[ev] = fn; };
     const safeRun = fn => async () => { try { await fn(); } catch (e) { S.run = null; setMsg((e instanceof SessionError ? '⚠ ' : 'Error: ') + e.message); } };
@@ -817,6 +865,7 @@
     on('f_csv', 'onclick', () => preset({ docJson: false, histCsv: true, histJson: false, attCsv: true, manifest: true }));
     on('f_json', 'onclick', () => preset({ docJson: true, histCsv: false, histJson: true, attCsv: false, manifest: false }));
     on('f_none', 'onclick', () => preset({ docJson: false, histCsv: false, histJson: false, attCsv: false, manifest: false }));
+    on('s_check', 'onclick', () => { diag = checkSetup(); render(); });
     on('s_detect', 'onclick', async () => {
       detectSession(); await detectUserFallback();
       if (s.pageSizeSrc === 'manual') s.pageSizeSrc = 'default';
@@ -827,6 +876,7 @@
     if (focusLi && $('li') && !$('li').disabled) { $('li').focus(); $('li').setSelectionRange(selA, selB); }
     if (showSettings) for (const id of S_FIELDS) { const el = $(id); if (!el) continue; if (id in sDraft) el.value = sDraft[id]; el.addEventListener('input', () => { sDraft[id] = el.value; }); }
     root.querySelector('.body').scrollTop = scroll;
+    if (focusOnOpen) { const t = $('li') && !$('li').disabled ? $('li') : root.querySelector('.dr ' + FOCUSABLE.split(',').join(',.dr ')); if (t) t.focus(); }
     syncToolbar();
   }
   const cancelRun = () => { if (S.run) { S.run.cancel = true; S.run.paused = false; } };

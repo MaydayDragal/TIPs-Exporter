@@ -1,4 +1,4 @@
-// Toolbar button: toggle the exporter panel on the TIPS Reader tab.
+// Toolbar icon: open/close the exporter drawer on the TIPS Reader tab.
 const READER = 'https://xentry.mercedes-benz.com/tips-reader/';
 
 chrome.action.onClicked.addListener(async (tab) => {
@@ -10,9 +10,9 @@ chrome.action.onClicked.addListener(async (tab) => {
   try {
     await chrome.tabs.sendMessage(tab.id, { type: 'toggle' });
   } catch (e) {
-    // Tab was open before the extension was installed/reloaded: inject, then toggle.
-    await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['pagesize-probe.js'], world: 'MAIN' });
-    await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['content.js'] });
-    await chrome.tabs.sendMessage(tab.id, { type: 'toggle' });
+    // Tab was open before the extension was installed/updated, so it has no exporter yet:
+    // reload it and open the drawer once it is back (content.js reads this flag on load).
+    await chrome.storage.local.set({ openOnLoad: Date.now() });
+    chrome.tabs.reload(tab.id);
   }
 });
