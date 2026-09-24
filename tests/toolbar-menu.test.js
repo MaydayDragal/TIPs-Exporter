@@ -12,7 +12,10 @@ async function fakeFetch(url, init = {}) {
   if (u.includes('/topics/search')) { const b = JSON.parse(init.body); const h = b.docName === TOPIC.tips ? [TOPIC] : []; return { ok: true, status: 200, json: async () => ({ totalHits: h.length, hits: h }) }; }
   if (u.includes('/currentuser')) return { ok: true, status: 200, json: async () => ({ userId: 'u1', currentOutlet: 'o1' }) };
   if (u.includes('/file/topics/')) return { ok: true, status: 200, arrayBuffer: async () => new ArrayBuffer(200 * 1024) };
-  if (/\/topics\/242206748\/6\?/.test(u)) return { ok: true, status: 200, json: async () => ({ version: 6, attachments: [], references: [], history: { children: [] } }) };
+  if (/\/topics\/242206748\/6\?/.test(u)) return { ok: true, status: 200, json: async () => ({ version: 6, i18nChangeReason: { en: 'Worksheet update. \nLanguage updates.' }, attachments: [{ attId: 1, filename: 'Repeat Brake Judder Data Gathering.pdf', dataUrl: 'https://x/y?readKey=rk1' }], references: [],
+    history: { children: [{ version: 6, flowId: 'DRA', creationDate: '2026-09-16T16:56:36.714Z', i18nChangeReason: {} }, { version: 6, flowId: 'PUB', creationDate: '2026-09-21T15:37:16.433Z', i18nChangeReason: {} }, { version: 5, flowId: 'PUB', creationDate: '2026-05-15T12:39:51.58Z', i18nChangeReason: {} }] } }) };
+  if (u.includes('/download/url')) return { ok: true, status: 200, json: async () => ({ url: 's3.example/f' }) };
+  if (u.startsWith('https://s3.example/')) return { ok: true, status: 200, arrayBuffer: async () => new ArrayBuffer(1024) };
   return { ok: false, status: 404 };
 }
 const ICON = 'style="width:48px;height:48px;border:0;background:#fff;color:#222"';
@@ -56,14 +59,20 @@ const ok = (c, m) => { console.log((c ? 'PASS ' : 'FAIL ') + m); if (!c) process
   ok(wrap.previousElementSibling && wrap.previousElementSibling.querySelector('.xy-i-print') && wrap.nextElementSibling.classList.contains('xy-border-right'), 'placed right after Print, before the divider');
   ok(b[0].getAttribute('aria-label').includes('Download this topic'), 'has an accessible label');
   const tipText = () => b[0].nextElementSibling.textContent;
-  ok(tipText() === 'Download LI42.10-P-078779 with all 5 prior versions, attachments and linksTIPS Exporter', 'tooltip: ' + tipText());
+  ok(tipText() === 'Download LI42.10-P-078779 – choose versions and attachmentsTIPS Exporter', 'tooltip: ' + tipText());
 
   // no feedback loop between our updates and the observer
   const r1 = e.raf(); await tick(600);
   ok(e.raf() - r1 <= 1, `page watcher is quiet when nothing changes (${e.raf() - r1} extra frames)`);
 
-  // download
+  // download: the button opens the version picker first (current version ticked, with its change reason)
+  const pk = () => { for (const el of e.w.document.documentElement.children) { const r = el.shadowRoot, x = r && r.querySelector('.pk'); if (x) return x; } return null; };
   b[0].click();
+  await waitFor(() => pk() && pk().querySelector('#p_go') && !pk().querySelector('#p_go').disabled);
+  const ptxt = pk().textContent.replace(/\s+/g, ' ');
+  ok([...pk().querySelectorAll('input[data-v]')].map(x => x.dataset.v + (x.checked ? '*' : '')).join() === '6*,5,4,3,2,1', 'toolbar button opens the picker: v6 … v1, only v6 ticked');
+  ok(/Worksheet update\. Language updates\./.test(ptxt) && /Include attachments \(1 file\)/.test(ptxt) && b[0].getAttribute('aria-expanded') === 'true' && e.saved.length === 0, 'current version shows its change reason (from the topic data); nothing saved yet');
+  pk().querySelector('#p_all').click(); pk().querySelector('#p_go').click();
   await waitFor(() => b[0].dataset.state === 'busy');
   ok(true, 'button shows busy spinner');
   await waitFor(() => e.fab() === 'busy');
@@ -115,9 +124,11 @@ const ok = (c, m) => { console.log((c ? 'PASS ' : 'FAIL ') + m); if (!c) process
   const e2 = makeEnv({ index: [] });
   await tick(150);
   console.log('   e2 tip:', JSON.stringify(e2.btns()[0].nextElementSibling.textContent), e2.btns()[0].dataset.state);
-  ok(e2.btns()[0].nextElementSibling.textContent.startsWith('Download LI42.10-P-078779 with all 5 prior'), 'without an index the LI number comes from the dialog');
+  ok(e2.btns()[0].nextElementSibling.textContent.startsWith('Download LI42.10-P-078779 – choose versions'), 'without an index the LI number comes from the dialog');
   e2.btns()[0].click();
+  { const go = () => { for (const el of e2.w.document.documentElement.children) { const x = el.shadowRoot && el.shadowRoot.querySelector('#p_go'); if (x) return x; } return null; };
+    await waitFor(() => go() && !go().disabled); go().click(); }
   await waitFor(() => e2.btns()[0].dataset.state === 'done');
-  ok(e2.saved[0] === 'TIPS_LI42.10-P-078779.zip', 'download works without an index');
+  ok(e2.saved[0] === 'TIPS_LI42.10-P-078779_v6.zip', 'download works without an index (current version: ' + e2.saved[0] + ')');
   process.exit();
 })().catch(err => { console.error('ERROR', err); process.exit(1); });

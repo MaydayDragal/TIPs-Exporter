@@ -74,8 +74,10 @@ const IDX = T.map(x => ({ tips: x.tips, tipsId: x.tipsId, version: x.version, ti
     e.type('LI54.10-P-080684 LI20.10-P-075374'); e.$('look').click(); await waitFor(() => e.$('dlfound'));
     const b = e.w.document.querySelector('button.tipsx-dl');
     b.click();
+    const go = () => { for (const el of e.w.document.documentElement.children) { const x = el.shadowRoot && el.shadowRoot.querySelector('#p_go'); if (x) return x; } return null; };
+    await waitFor(() => go() && !go().disabled); go().click();
     await waitFor(() => b.dataset.state === 'done');
-    ok(e.saved[0] === 'TIPS_LI42.10-P-078779.zip', 'F7: toolbar download saved the open topic');
+    ok(/^TIPS_LI42\.10-P-078779_v\d+\.zip$/.test(e.saved[0]), 'F7: toolbar download saved the open topic (current version, the picker default): ' + e.saved[0]);
     ok(e.$('dlfound') && /Download 2/.test(e.text()) && e.$('li').value === 'LI54.10-P-080684 LI20.10-P-075374', 'F7: panel still shows the user\'s looked-up list afterwards');
     // second click while a panel download runs → specific message, not a stale one
     e.$('dlfound').click(); await waitFor(() => e.$('cancel'));

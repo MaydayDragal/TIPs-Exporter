@@ -1,5 +1,5 @@
 // v1.7 features: path lengths, zip size cap, resume after a lost session, current search, update checks,
-// search-result rows (download icon + tick boxes + selection bar), keyboard shortcut.
+// search-result row download icon with its version / attachment picker, keyboard shortcut.
 const { JSDOM } = require('jsdom');
 const fs = require('fs'), path = require('path');
 const SRC = require('path').join(__dirname, '..') + '/';
@@ -35,7 +35,9 @@ async function fakeFetch(url, init = {}) {
   if (m) {
     const t = byId[m[1]];
     const attachments = t.tipsId === 102 ? [{ attId: 1, filename: 'Wiring diagram for power steering control unit N68 with all connector pin assignments and ground points revision C.pdf', dataUrl: 'https://x/y?readKey=rk1', type: 'PDF' }] : [];
-    return { ok: true, status: 200, json: async () => ({ version: +m[2], attachments, references: [], history: { children: [] } }) };
+    const children = t.tipsId === 101 ? [{ version: 5, flowId: 'REA', creationDate: '2026-09-20T09:00:00Z', i18nChangeReason: {} }, { version: 5, flowId: 'PUB', creationDate: '2026-09-21T11:37:00Z', i18nChangeReason: {} }, { version: 3, flowId: 'DRA', creationDate: '2026-02-20T08:00:00Z', i18nChangeReason: { en: 'Extended to model series 214' } }, { version: 3, flowId: 'PUB', creationDate: '2026-03-02T08:00:00Z' }, { version: 2, flowId: 'PUB', creationDate: '02.11.2025 some format' }] : [];
+    log.push({ kind: 'data', id: m[1] });
+    return { ok: true, status: 200, json: async () => ({ version: +m[2], i18nChangeReason: t.tipsId === 101 ? { en: 'Added road test\nstep' } : {}, attachments, references: [], history: { children } }) };
   }
   if (u.includes('/download/url')) return { ok: true, status: 200, json: async () => ({ url: 's3.example/f' }) };
   if (u.startsWith('https://s3.example/')) return { ok: true, status: 200, arrayBuffer: async () => new Uint8Array(1024).buffer };
@@ -157,38 +159,70 @@ const IDX = T.map(t => ({ tips: t.tips, tipsId: t.tipsId, version: t.version, ti
     const e = makeEnv({ index: IDX }, cards());
     await tick(200);
     const rows = [...e.w.document.querySelectorAll('.tipsx-row')];
-    ok(rows.length === 4 && rows.every(r => r.querySelector('.tipsx-rdl') && r.querySelector('input')), 'each result row gets a download icon and a tick box');
+    ok(rows.length === 4 && rows.every(r => r.querySelectorAll('button').length === 1 && r.querySelector('.tipsx-rdl')), 'each result row gets a download icon');
     ok(rows[0].parentElement.tagName === 'XY-C-CARD-TABLE-CARD' && rows[0].previousElementSibling.tagName === 'BUTTON', 'controls sit beside the row\'s button, not inside it');
     let rowClicked = 0; e.w.document.querySelectorAll('xy-c-card-table-card > button').forEach(b => b.addEventListener('click', () => rowClicked++));
-    rows[0].querySelector('.tipsx-rdl').click();
-    await waitFor(() => rows[0].querySelector('.tipsx-rdl').dataset.state === 'done');
-    ok(e.saved.at(-1).name === 'TIPS_LI42.10-P-078779.zip' && rowClicked === 0, 'row download icon saves that topic without opening it');
-    rows[1].querySelector('input').click(); rows[3].querySelector('input').click(); await tick(30);
-    ok(/2 selected LI46\.10-P-070001, LI20\.10-P-075374/.test(e.text()) && e.$('seldl'), 'ticking rows shows the selection bar');
-    ok(rows[1].parentElement.classList.contains('tipsx-picked'), 'ticked rows are marked');
-    e.$('seldl').click();
-    await waitFor(() => /Saved to Downloads/.test(e.text()));
-    ok(/TIPS_selection_.*_2docs\.zip/.test(e.saved.at(-1).name) && !e.w.document.querySelector('.tipsx-row input:checked'), 'Download 2 opens the drawer, saves both, clears the ticks');
-    // lazy list: new cards get controls, ticks survive re-render
+    const pk = () => { for (const el of e.w.document.documentElement.children) { const r = el.shadowRoot, x = r && r.querySelector('.pk'); if (x) return x; } return null; };
+    const pt = () => pk() ? pk().textContent.replace(/\s+/g, ' ') : '';
+    const P = id => pk() && pk().querySelector('#' + id);
+    const icon = r => rows[r].querySelector('.tipsx-rdl');
+    // picker: every version, newest first, with date and change reason; nothing saved until Download
+    icon(0).click(); await waitFor(() => P('p_go') && !P('p_go').disabled);
+    const vs = [...pk().querySelectorAll('input[data-v]')].map(x => +x.dataset.v);
+    const ticked = [...pk().querySelectorAll('input[data-v]:checked')].map(x => +x.dataset.v);
+    ok(vs.join() === '5,4,3,2,1' && ticked.join() === '5', 'download icon opens a list of all 5 versions, newest first, only the current one ticked');
+    ok(/v5\s*current/.test(pt()) && pt().includes(new Date('2026-09-21T11:37:00Z').toLocaleDateString()) && /Added road test step/.test(pt()) && /Download 1 version/.test(pt()), 'each version shows its date and change reason; button says Download 1 version');
+    ok(/no attachments or links/.test(pt()) && !P('p_att') && icon(0).getAttribute('aria-expanded') === 'true', 'a topic without attachments says so');
+    ok(/Extended to model series 214/.test(pt()) && /02\.11\.202/.test(pt()), 'change reason found on the draft entry; an unknown date format is shown as given');
+    e.w.document.body.dispatchEvent(new e.w.Event('pointerdown', { bubbles: true, composed: true })); await tick(20);
+    ok(!pk() && e.saved.length === 0, 'clicking elsewhere on the page closes the picker');
+    icon(0).click(); await waitFor(() => P('p_go'));
+    e.w.__toggle({ type: 'toggle' }, null, () => { }); await tick(30);
+    ok(!pk() && !!e.root().querySelector('.dr'), 'opening the drawer closes the picker');
+    e.w.__toggle({ type: 'toggle' }, null, () => { }); await tick(30);
+    ok(e.saved.length === 0 && rowClicked === 0, 'nothing downloaded yet, and the row itself was not opened');
+    e.w.dispatchEvent(new e.w.KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); await tick(20);
+    ok(!pk() && e.saved.length === 0 && icon(0).getAttribute('aria-expanded') === 'false', 'Esc closes the picker without downloading');
+    icon(0).click(); await waitFor(() => P('p_go') && !P('p_go').disabled);
+    icon(0).click(); await tick(20);
+    ok(!pk(), 'clicking the icon again closes it');
+    // pick v5 + v3 only
+    icon(0).click(); await waitFor(() => P('p_go') && !P('p_go').disabled);
+    const dataReads = log.filter(x => x.kind === 'data').length;
+    P('p_all').click(); await tick(10);
+    ok(/Download all 5 versions/.test(pt()) && pk().querySelectorAll('input[data-v]:checked').length === 5, 'All ticks every version');
+    P('p_cur').click(); await tick(10);
+    ok(/Download 1 version/.test(pt()) && pk().querySelectorAll('input[data-v]:checked').length === 1, 'Current only goes back to just v5');
+    const v3 = pk().querySelector('input[data-v="3"]'); v3.click(); await tick(10);
+    ok(/Download 2 versions/.test(pt()), 'ticking v3 as well: Download 2 versions');
+    const before = log.length;
+    P('p_go').click();
+    await waitFor(() => icon(0).dataset.state === 'done');
+    const z1 = await unzip(e.w, e.saved.at(-1).blob), pdf1 = z1.filter(n => n.endsWith('.pdf')).map(n => n.split('/').pop()).sort();
+    ok(e.saved.at(-1).name === 'TIPS_LI42.10-P-078779_v3_v5.zip' && pdf1.join() === 'LI42.10-P-078779_v3.pdf,LI42.10-P-078779_v5.pdf', 'saves only the picked versions: ' + e.saved.at(-1).name + ' · ' + pdf1.join(' '));
+    ok(log.slice(before).filter(x => x.kind === 'pdf').map(x => x.v).sort().join() === '3,5' && log.filter(x => x.kind === 'data').length === dataReads, 'only those 2 PDFs are requested; the topic data is not read twice');
+    ok(!pk() && rowClicked === 0 && e.w.document.activeElement === icon(0), 'picker closes, focus is back on the row icon; the row was never opened');
+    // attachments off
+    icon(1).click(); await waitFor(() => P('p_att'));
+    ok(/Include attachments \(1 file\)/.test(pt()) && P('p_att').checked, 'topic with an attachment: Include attachments (1 file), ticked');
+    P('p_att').click(); P('p_go').click();
+    await waitFor(() => icon(1).dataset.state === 'done');
+    const z2 = await unzip(e.w, e.saved.at(-1).blob);
+    ok(e.saved.at(-1).name === 'TIPS_LI46.10-P-070001_v2_no-attachments.zip' && !z2.some(n => n.includes('Attachments')) && z2.filter(n => n.endsWith('.pdf')).length === 1, 'without attachments: current version only, no attachment folder (' + e.saved.at(-1).name + ')');
+    // the default: straight to Download saves just the current version
+    icon(0).click(); await waitFor(() => P('p_go') && !P('p_go').disabled); P('p_go').click();
+    await waitFor(() => e.saved.length === 3);
+    const z3 = (await unzip(e.w, e.saved.at(-1).blob)).filter(n => n.endsWith('.pdf'));
+    ok(e.saved.at(-1).name === 'TIPS_LI42.10-P-078779_v5.zip' && z3.length === 1 && z3[0].endsWith('_v5.pdf'), 'default (current version) saves TIPS_<LI>_v5.zip with just that PDF');
+    // everything keeps the plain name
+    icon(0).click(); await waitFor(() => P('p_go') && !P('p_go').disabled); P('p_all').click(); P('p_go').click();
+    await waitFor(() => e.saved.length === 4);
+    ok(e.saved.at(-1).name === 'TIPS_LI42.10-P-078779.zip' && (await unzip(e.w, e.saved.at(-1).blob)).filter(n => n.endsWith('.pdf')).length === 5, 'All + attachments saves TIPS_<LI>.zip with all 5 PDFs');
+    ok(!e.w.document.querySelector('.tipsx-row input, .tipsx-sel') && !e.root().querySelector('.selbar'), 'no tick boxes or selection bar');
+    // lazy list: new cards get the icon too
     e.w.document.querySelector('.xy-c-card-list-wrapper > div').insertAdjacentHTML('beforeend', `<div><xy-c-card-table-card id="card-105_1_P"><button><xy-c-card-column><p>LI82.60-P-080383</p></xy-c-card-column><xy-c-card-column><p>Radio cover art</p></xy-c-card-column></button></xy-c-card-table-card></div>`);
     await tick(100);
     ok(!!e.w.document.querySelector('#card-105_1_P > .tipsx-row'), 'rows loaded later (scrolling) get controls too');
-  }
-  // ---- 6b: selection follows the list order (not TIPS's internal ids); the last row can scroll clear of the bar
-  {
-    const e = makeEnv({ index: IDX }, cards([...T].reverse()));
-    await tick(200);
-    const rows = [...e.w.document.querySelectorAll('.tipsx-row')], last = rows.at(-1).parentElement;
-    ok(!last.classList.contains('tipsx-lastpad'), 'no extra space below the list while nothing is ticked');
-    rows[2].querySelector('input').click(); rows[0].querySelector('input').click(); await tick(30);
-    ok(/2 selected LI20\.10-P-075374, LI46\.10-P-070001/.test(e.text()), 'selection bar lists topics in the order they appear on the page');
-    ok(last.classList.contains('tipsx-lastpad') && e.w.document.querySelectorAll('.tipsx-lastpad').length === 1, 'last row gets space below it while the bar shows');
-    e.$('selclear').click(); await tick(30);
-    ok(!e.w.document.querySelector('.tipsx-lastpad') && !e.$('seldl'), 'Clear removes the bar and the extra space');
-    rows[2].querySelector('input').click(); rows[0].querySelector('input').click(); await tick(30);
-    e.$('seldl').click(); await waitFor(() => /Saved to Downloads/.test(e.text()));
-    const tops = [...new Set((await unzip(e.w, e.saved.at(-1).blob)).filter(n => n.includes('/')).map(n => n.split('/')[0].slice(0, 16)))];
-    ok(tops.join(' ') === 'LI20.10-P-075374 LI46.10-P-070001', 'the zip keeps the page order too');
   }
   // ---- 7: keyboard shortcut
   const man = JSON.parse(fs.readFileSync(SRC + 'manifest.json', 'utf8'));

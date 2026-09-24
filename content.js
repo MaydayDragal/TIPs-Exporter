@@ -31,7 +31,6 @@
     recent: [],         // single-LI downloads [{fname, tips: [..], v, sizeMB, docs, date}]
     single: null,       // single-LI flow: {phase: 'looking'|'looked'|'done', ...}
     resume: null,       // a download interrupted by a lost session: {title, kind, remaining, carry, finish}
-    sel: {},            // search-result rows ticked for download: tipsId -> {tips, tipsId, version, title}
     latest: {},         // newest versions seen by "Check for updates": tips -> version
     settings: { outlet: '', user: '', ver: '', batchSize: 25, delayMs: 2000, delayMaxMs: 5000, pageSize: 50, pageSizeSrc: 'default',
       autoApprove: false, autoContinue: true,
@@ -263,24 +262,31 @@
   }
 
   // ---------------------------------------------------------------- export one document
+  // item.opts (from the row picker): {versions: [n…], att: bool, doc} – only those versions, attachments optional,
+  // and the topic data it already read. Without opts: the current version, every prior version and all attachments.
   async function exportDoc(item, files, errors, step) {
-    const base = `${safe(item.tips)} - ${clip(item.title, 45)}`;
+    const base = `${safe(item.tips)} - ${clip(item.title, 45)}`, o = item.opts || null;
     step('topic data', { g: 'data' });
-    const jr = await get(`/tips/topic-service/api/v1/topics/${item.tipsId}/${item.version}?${Q()}`, 'application/json');
-    if (!jr.ok) throw new Error('topic data HTTP ' + jr.status);
-    const doc = await jr.json();
-    const v = doc.version || item.version;
+    let doc = o && o.doc;
+    if (!doc) {
+      const jr = await get(`/tips/topic-service/api/v1/topics/${item.tipsId}/${item.version}?${Q()}`, 'application/json');
+      if (!jr.ok) throw new Error('topic data HTTP ' + jr.status);
+      doc = await jr.json();
+    }
+    const v = doc.version || item.version, want = n => !o || o.versions.includes(n);
     const F = S.settings.files;
     if (F.docJson) files.push({ name: `${base}/${safe(item.tips)}_v${v}.json`, data: txt(JSON.stringify(doc, null, 2)) });
 
-    step(`PDF v${v}`, { g: 'pdf', v });
-    const pr = await get(`/tips/topic-service/api/v1/file/topics/${item.tipsId}/${v}?${Q()}`, 'application/pdf');
-    if (pr.ok) files.push({ name: `${base}/${safe(item.tips)}_v${v}.pdf`, data: new Uint8Array(await pr.arrayBuffer()) });
-    else errors.push(`${item.tips}: current PDF HTTP ${pr.status}`);
+    if (want(v)) {
+      step(`PDF v${v}`, { g: 'pdf', v });
+      const pr = await get(`/tips/topic-service/api/v1/file/topics/${item.tipsId}/${v}?${Q()}`, 'application/pdf');
+      if (pr.ok) files.push({ name: `${base}/${safe(item.tips)}_v${v}.pdf`, data: new Uint8Array(await pr.arrayBuffer()) });
+      else errors.push(`${item.tips}: current PDF HTTP ${pr.status}`);
+    }
 
     const atts = doc.attachments || [], refs = doc.references || [];
     let nAtt = 0;
-    if (atts.length || refs.length) {
+    if ((atts.length || refs.length) && (!o || o.att)) {
       const dir = `${base}/Attachments and Links`;
       const lines = ['type,filename_or_target,description,created'];
       const used = new Set();
@@ -309,8 +315,9 @@
     if (F.histCsv) files.push({ name: `${rdir}/revision_history.csv`, data: txt(hl.join('\r\n')) });
     if (F.histJson) files.push({ name: `${rdir}/revision_history.json`, data: txt(JSON.stringify(doc.history || {}, null, 2)) });
     let nPrev = 0;
-    for (let pv = 1; pv < v; pv++) {
-      step(`prior version v${pv}`, { g: 'prior', k: pv, n: v - 1 });
+    const priors = []; for (let pv = 1; pv < v; pv++) if (want(pv)) priors.push(pv);
+    for (const [k, pv] of priors.entries()) {
+      step(`prior version v${pv}`, { g: 'prior', k: k + 1, n: priors.length, v: pv });
       try {
         const r = await get(`/tips/topic-service/api/v1/file/topics/${item.tipsId}/${pv}?${Q()}`, 'application/pdf');
         if (r.ok) { files.push({ name: `${rdir}/${safe(item.tips)}_v${pv}.pdf`, data: new Uint8Array(await r.arrayBuffer()) }); nPrev++; }
@@ -345,12 +352,13 @@
         }
         while (S.run.paused && !S.run.cancel) await sleep(400);
         if (S.run.cancel) throw new Error('cancelled');
-        S.run.i++; S.run.label = it.tips; S.run.step = null; S.run.attN = 0; render();
+        S.run.i++; S.run.label = it.tips; S.run.step = null; S.run.attN = 0; S.run.curPdf = false; render();
         const fMark = files.length, eMark = errors.length;
         try {
           const r = await exporter(it, files, errors, (s, info) => {
             S.run.label = `${it.tips} – ${s}`; S.run.step = info || null;
             if (info && info.g === 'att') S.run.attN = info.n;
+            if (info && info.g === 'pdf') S.run.curPdf = true;
             if (S.run.kind !== 'bulk') renderRunBox(); else renderProgress();
           });
           for (let f = fMark; f < files.length; f++) bytes += files[f].data.length;
@@ -513,7 +521,9 @@
     const n = S.recent.reduce((a, r) => a + recentUpdates(r).length, 0);
     setMsg(n ? `${n} of your recent downloads ${n === 1 ? 'has' : 'have'} a newer version in TIPS.` : 'All your recent downloads are up to date.');
   }
-  const selectionName = found => found.length === 1 ? `TIPS_${safe(found[0].tips)}.zip` : `TIPS_selection_${new Date().toISOString().slice(0, 10)}_${found.length}docs.zip`;
+  const verTag = o => { if (!o) return ''; const v = o.versions;
+    return (o.allVers ? '' : v.length === 1 ? `_v${v[0]}` : v.every((x, i) => !i || x === v[i - 1] + 1) ? `_v${v[0]}-v${v.at(-1)}` : '_v' + v.join('_v')) + (o.dropAtt ? '_no-attachments' : ''); };
+  const selectionName = found => found.length === 1 ? `TIPS_${safe(found[0].tips)}${verTag(found[0].opts)}.zip` : `TIPS_selection_${new Date().toISOString().slice(0, 10)}_${found.length}docs.zip`;
   async function lookupSpecific(text) {
     if (busy()) { setMsg('Finish, resume or discard the current download first.'); return; }
     if (!sessionOK()) { setMsg('Session values missing – open ⚙ Settings.'); return; }
@@ -566,7 +576,7 @@
   const css = `
   :host{all:initial}
   *{box-sizing:border-box}
-  .dim,.dr{--f:"Mercedes-Benz Corpo S Text Regular","XF CorpoS normal",Arial,sans-serif;--ft:"Mercedes-Benz Corpo A Title Condensed","XF CorpoA normal",Georgia,serif;
+  .dim,.dr,.pk{--f:"Mercedes-Benz Corpo S Text Regular","XF CorpoS normal",Arial,sans-serif;--ft:"Mercedes-Benz Corpo A Title Condensed","XF CorpoA normal",Georgia,serif;
     --tx:#333333;--lab:#595959;--dis:#9b9b9b;--blue:#006EFF;--blueH:#0058cc;--blueP:#002c66;--soft:#e6f1ff;--sel:#cce2ff;--softP:#99c5ff;
     --grey:#595959;--greyH:#474747;--bar:#dedede;--barB:#cdcdcd;--stroke:#7a7a7a;--div:#dedede;--row2:#eeeeee;
     --ok:#018601;--okbg:#e6f3e6;--al:#EE7100;--albg:#fdf1e6;--er:#EA060A;--erbg:#fde6e7;--sh:0 1px 3px 0 rgba(0,0,0,.2)}
@@ -637,10 +647,20 @@
   pre{white-space:pre-wrap;font-size:12px;max-height:140px;overflow:auto;background:#fff;padding:6px;margin:6px 0 0}
   table{width:100%;border-collapse:collapse;font-size:13px;margin-top:8px} td,th{padding:6px 4px;border-bottom:1px solid var(--div);text-align:left} th{font-weight:700}
   code{font-size:12px;color:var(--lab)}
-  .selbar{--f:"Mercedes-Benz Corpo S Text Regular","XF CorpoS normal",Arial,sans-serif;--tx:#333333;--lab:#595959;--blue:#006EFF;--blueH:#0058cc;--bar:#dedede;--barB:#cdcdcd;--sh:0 1px 3px 0 rgba(0,0,0,.2);
-    position:fixed;left:50%;bottom:24px;transform:translateX(-50%);display:flex;align-items:center;gap:12px;padding:10px 10px 10px 18px;background:#fff;border:1px solid #7a7a7a;
-    box-shadow:0 8px 24px rgba(0,0,0,.3);font:14px/1.4 var(--f);color:var(--tx);max-width:calc(100vw - 32px)}
-  .selbar .bd{display:flex;flex-direction:column;min-width:0} .selbar .mut{color:var(--lab);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:360px}`;
+  .pk{position:fixed;width:380px;max-width:calc(100vw - 32px);display:flex;flex-direction:column;background:#fff;border:1px solid var(--stroke);
+    box-shadow:0 8px 24px rgba(0,0,0,.3);color:var(--tx);font:14px/1.4 var(--f);-webkit-font-smoothing:antialiased}
+  .pk .phd{display:flex;align-items:flex-start;gap:8px;padding:12px 4px 4px 16px} .pk .phd .bd{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px;padding-top:4px}
+  .pk .one{white-space:nowrap;overflow:hidden;text-overflow:ellipsis} .pk .ib{width:40px;height:40px}
+  .pk .pbd{padding:8px 16px 14px;display:flex;flex-direction:column;gap:10px}
+  .pk .vl{max-height:min(300px,40vh);overflow:auto;border-top:1px solid var(--div);border-bottom:1px solid var(--div)}
+  .pk .vl::-webkit-scrollbar{width:6px}.pk .vl::-webkit-scrollbar-thumb{background:#cacaca;border-radius:1ex}
+  .pk .vr{align-items:flex-start;padding:9px 4px} .pk .vr+.vr{border-top:1px solid var(--div)} .pk .vr input{margin-top:1px}
+  .pk .vr .bd{flex:1;min-width:0;display:flex;flex-direction:column} .pk .vr .l1{display:flex;align-items:baseline;gap:8px} .pk .dt{margin-left:auto}
+  .pk .tag{font-size:12px;line-height:16px;padding:0 6px;background:var(--sel);color:var(--blueP)}
+  .pk .lk{border:0;background:none;padding:0;color:var(--blue);font:13px var(--f);cursor:pointer} .pk .lk:hover{text-decoration:underline} .pk .lk:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
+  .pk .ld{display:flex;align-items:center;gap:8px;padding:6px 0}
+  .pk .pft{display:flex;justify-content:flex-end;gap:8px;padding:10px 16px;background:var(--row2)}
+`;
   const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
   function setMsg(m) { S.msg = m; render(); }
   // top of the drawer = bottom of the Reader's black header
@@ -661,6 +681,7 @@
   }, true);
   let returnFocus = null;
   function openDrawer(open) {
+    if (open && pick) closePick(null);
     if (open && !visible) { justOpened = true; returnFocus = document.activeElement; }
     const wasVisible = visible;
     visible = open;
@@ -744,9 +765,9 @@
     let steps = '';
     if (st) {
       const L = [];
-      L.push(gi <= 1 ? ['cur', st.g === 'data' ? 'Topic data' : `Current PDF v${st.v}`] : ['done', 'Topic data &amp; current PDF']);
+      L.push(gi <= 1 ? ['cur', st.g === 'data' ? 'Topic data' : `Current PDF v${st.v}`] : ['done', run.curPdf ? 'Topic data &amp; current PDF' : 'Topic data']);
       if (run.attN) L.push(gi === 2 ? ['cur', `Attachment ${st.k} of ${st.n}`] : gi > 2 ? ['done', `${run.attN} attachment${run.attN > 1 ? 's' : ''}`] : null);
-      if (gi === 3) L.push(['cur', `Prior version v${st.k} of ${st.n}`]);
+      if (gi === 3) L.push(['cur', `Prior version v${st.v} – ${st.k} of ${st.n}`]);
       steps = `<ol class="steps">${L.filter(Boolean).map(([k, t]) => k === 'done' ? `<li class="mut"><span class="okc">✓</span>${t}</li>` : `<li><span class="acc spin">${svg('<circle cx="12" cy="12" r="8" stroke-opacity=".25"></circle><path d="M12 4a8 8 0 0 1 8 8"></path>', 16, 2.4)}</span>${t}</li>`).join('')}</ol>`;
     }
     return `<div class="sec"><div class="sp"><h3>Downloading</h3><span style="font-size:16px">Document ${Math.min(doneN + 1, run.total)} of ${run.total}</span></div>${pbar(100 * (doneN + frac) / run.total, false, 'pbar')}</div>
@@ -871,7 +892,7 @@
 
   function render() {
     syncRail();
-    if (!visible) { renderSelBar(); syncToolbar(); syncRows(); return; }
+    if (!visible) { root.innerHTML = ''; syncToolbar(); syncRows(); return; }
     // keep typing focus and scroll position across re-renders
     const ae = root.activeElement, focusLi = ae && ae.id === 'li', selA = focusLi ? ae.selectionStart : 0, selB = focusLi ? ae.selectionEnd : 0;
     const oldBody = root.querySelector('.body'), scroll = oldBody && lastView === view ? oldBody.scrollTop : 0; lastView = view;
@@ -1059,6 +1080,7 @@
   .tipsx-tip{position:absolute;top:calc(100% + 6px);right:0;z-index:100000;width:max-content;max-width:280px;padding:8px 10px;background:#222;color:#fff;font:12px/1.4 "Segoe UI",Arial,sans-serif;text-align:left;white-space:normal;pointer-events:none;opacity:0;transition:opacity .12s .2s}
   .tipsx-dlwrap:hover .tipsx-tip,.tipsx-dl:focus-visible+.tipsx-tip,.tipsx-dlwrap[data-show] .tipsx-tip{opacity:1}
   .tipsx-tip small{display:block;margin-top:2px;color:#bbb;font-size:11px}
+  .tipsx-dl[aria-expanded=true]{background:#e8f1fd;color:#1f6fd1} .tipsx-dlwrap .tipsx-dl[aria-expanded=true]+.tipsx-tip{display:none}
   .tipsx-menuitem{display:flex;align-items:center;gap:8px;text-align:left}
   .tipsx-mi-ic{display:inline-flex;width:24px;height:24px;align-items:center;justify-content:center;flex:none}
   .tipsx-mi-st{margin-left:auto;padding-left:16px;font-size:12px;color:#006EFF}
@@ -1066,15 +1088,9 @@
     background:#006EFF;color:#fff;font:700 11px/1 Arial,sans-serif;pointer-events:none;z-index:1}
   .tipsx-rbadge[data-kind=done]{background:#018601}
   .tipsx-row{position:absolute;right:10px;top:50%;transform:translateY(-50%);display:flex;align-items:center;gap:2px;z-index:2}
-  .tipsx-sel{display:inline-flex;width:36px;height:36px;align-items:center;justify-content:center;cursor:pointer}
-  .tipsx-sel input{appearance:none;-webkit-appearance:none;width:18px;height:18px;margin:0;border:1px solid #7a7a7a;background:#fff;display:inline-grid;place-content:center;cursor:pointer}
-  .tipsx-sel input::after{content:'';width:4px;height:9px;margin-top:-2px;border:solid #fff;border-width:0 2px 2px 0;transform:rotate(45deg) scale(0)}
-  .tipsx-sel input:checked{background:#006EFF;border-color:#006EFF} .tipsx-sel input:checked::after{transform:rotate(45deg) scale(1)}
-  .tipsx-sel input:focus-visible,.tipsx-rdl:focus-visible{outline:2px solid #006EFF;outline-offset:2px}
+  .tipsx-rdl:focus-visible{outline:2px solid #006EFF;outline-offset:2px}
   .tipsx-rdl{width:36px;height:36px;display:inline-flex;align-items:center;justify-content:center;border:0;background:transparent;color:#595959;cursor:pointer;padding:0}
-  .tipsx-rdl:hover{background:#e6f1ff;color:#006EFF} .tipsx-rdl[data-state=busy]{color:#006EFF;cursor:progress} .tipsx-rdl[data-state=done]{color:#018601} .tipsx-rdl[data-state=error]{color:#EA060A}
-  xy-c-card-table-card.tipsx-picked > button{box-shadow:inset 3px 0 0 #006EFF}
-  xy-c-card-table-card.tipsx-lastpad{margin-bottom:104px !important}`;
+  .tipsx-rdl:hover,.tipsx-rdl[aria-expanded=true]{background:#e6f1ff;color:#006EFF} .tipsx-rdl[data-state=busy]{color:#006EFF;cursor:progress} .tipsx-rdl[data-state=done]{color:#018601} .tipsx-rdl[data-state=error]{color:#EA060A}`;
   const pageSvg = (d, n) => `<svg width="${n}" height="${n}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${d}</svg>`;
   const TB_ICON = {
     idle: '<path d="M12 3v12"></path><path d="M7 10l5 5 5-5"></path><path d="M5 21h14"></path>',
@@ -1105,9 +1121,7 @@
     if (tb.state === 'busy') return `Downloading${S.run && S.run.kind === 'single' ? ' – ' + esc(runLabel(S.run)) : '…'}<small>TIPS Exporter</small>`;
     if (tb.state !== 'idle') return `${esc(tb.msg)}<small>TIPS Exporter</small>`;
     const t = openTopic();
-    if (!t) return 'Download this topic with all versions<small>TIPS Exporter</small>';
-    const prior = Math.max(0, t.version - 1);
-    return `Download ${esc(t.tips)} with ${prior ? `all ${prior} prior version${prior > 1 ? 's' : ''}, ` : ''}attachments and links<small>TIPS Exporter</small>`;
+    return `Download ${t ? esc(t.tips) : 'this topic'} – choose versions and attachments<small>TIPS Exporter</small>`;
   }
   function syncToolbar() {
     for (const b of document.querySelectorAll('button.tipsx-dl')) {
@@ -1123,8 +1137,9 @@
       if (tip.innerHTML !== html) tip.innerHTML = html;
     }
   }
-  async function downloadOpenTopic() {
+  async function downloadOpenTopic(anchor) {
     if (tb.state === 'busy') return;
+    if (pick) { const same = pick.anchor === anchor; closePick(null); if (same) return; }   // the button toggles its picker
     const settle = (state, msg, ms) => { tb.state = state; tb.msg = msg; syncToolbar(); setTimeout(() => { if (tb.state === state) { tb.state = 'idle'; syncToolbar(); } }, ms); };
     const t = openTopic();
     if (!t) return settle('error', "Couldn't tell which topic is open – use the panel instead.", 6000);
@@ -1142,7 +1157,14 @@
       // Never download a different topic than the one open: the LI number must belong to the topic in the address.
       if (hit && String(hit.tipsId) !== String(t.routeId)) { S.single = null; restore(); return settle('error', `${t.tips} is not the topic that's open – use the panel instead.`, 6000); }
       if (S.run || S.pending) { S.single = null; restore(); return settle('error', 'Another download started – try again when it finishes.', 6000); }
-      S.single = { phase: 'looked', found: [hit || { tips: t.tips, tipsId: t.routeId, version: t.version, title: t.title }], problems: [] };
+      const item = hit || { tips: t.tips, tipsId: t.routeId, version: t.version, title: t.title };
+      // pick versions / attachments; nothing is locked while the picker is open
+      S.single = null; restore(); tb.state = 'idle'; syncToolbar(); render();
+      const opts = await chooseDownload(item, anchor);
+      if (!opts) return;
+      if (busy() || (S.single && S.single.phase === 'looking')) return settle('error', 'Another download started – try again when it finishes.', 6000);
+      tb.state = 'busy'; syncToolbar();
+      S.single = { phase: 'looked', found: [{ ...item, version: opts.doc.version || item.version, opts }], problems: [] };
       await downloadFound();
       if (S.single && S.single.phase === 'done') {
         const m = S.single.sum, fname = S.single.fname;
@@ -1167,12 +1189,12 @@
       const b = document.createElement('button');
       b.type = 'button'; b.className = 'tipsx-dl'; b.style.width = w + 'px'; b.style.height = h + 'px';
       b.dataset.icon = Math.round(Math.min(w, h) * .6);
-      b.setAttribute('aria-label', 'Download this topic with all versions (TIPS Exporter)');
+      b.setAttribute('aria-label', 'Download this topic – choose versions (TIPS Exporter)'); b.setAttribute('aria-haspopup', 'dialog'); b.setAttribute('aria-expanded', 'false');
       b.style.setProperty('--tipsx-fg', getComputedStyle(print).color);
       const tip = document.createElement('div'); tip.className = 'tipsx-tip'; tip.setAttribute('role', 'tooltip');
       wrap.append(b, tip);
       anchor.after(wrap);
-      b.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); downloadOpenTopic(); });
+      b.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); downloadOpenTopic(b); });
       wrap.addEventListener('mouseenter', syncToolbar);
       added = true;
     }
@@ -1183,20 +1205,6 @@
   // Each topic in the search results is a card <xy-c-card-table-card id="card-<topicId>_<version>_P"> holding one big button.
   // Our controls sit beside that button (not inside it) at the right edge of the card.
   const ROW_RE = /^card-(\d+)_(\d+)_P$/, rowState = {};
-  let selSeq = 0;
-  // Selected topics in the order they appear in the results list (ticked rows no longer on the page go last, in tick order).
-  function selList() {
-    const pos = {}; let i = 0;
-    for (const c of document.querySelectorAll('xy-c-card-table-card[id^="card-"]')) { const m = c.id.match(ROW_RE); if (m && !(m[1] in pos)) pos[m[1]] = i++; }
-    const at = x => x.tipsId in pos ? pos[x.tipsId] : 1e9 + (x.at || 0);
-    return Object.values(S.sel).sort((a, b) => at(a) - at(b)).map(({ at: _, ...x }) => x);
-  }
-  // While the selection bar shows, the last result card gets extra space below it so it can be scrolled clear of the bar.
-  function padLast() {
-    const cards = document.querySelectorAll('xy-c-card-table-card[id^="card-"]'), last = cards[cards.length - 1], on = Object.keys(S.sel).length > 0;
-    for (const c of document.querySelectorAll('.tipsx-lastpad')) if (c !== last || !on) c.classList.remove('tipsx-lastpad');
-    if (last && on) last.classList.add('tipsx-lastpad');
-  }
   function injectRows() {
     let added = false;
     for (const card of document.querySelectorAll('xy-c-card-table-card[id^="card-"]')) {
@@ -1207,37 +1215,36 @@
       if (!tips) continue;
       const item = { tips, tipsId: m[1], version: +m[2], title: cols[1] ? cols[1].textContent.trim() : '' };
       if (getComputedStyle(card).position === 'static') card.style.position = 'relative';
-      btn.style.paddingRight = '92px';
+      btn.style.paddingRight = '56px';
       const box = document.createElement('div');
       box.className = 'tipsx-row'; box.dataset.tipsId = item.tipsId;
-      box.innerHTML = `<label class="tipsx-sel" title="Select for download"><input type="checkbox" aria-label="Select ${esc(tips)} for download"></label>`
-        + `<button type="button" class="tipsx-rdl" aria-label="Download ${esc(tips)} with all versions" title="Download ${esc(tips)} with all versions, attachments and links (TIPS Exporter)"></button>`;
-      const cb = box.querySelector('input'), dl = box.querySelector('.tipsx-rdl');
+      box.innerHTML = `<button type="button" class="tipsx-rdl" aria-label="Download ${esc(tips)} – choose versions" aria-haspopup="dialog" aria-expanded="false" title="Download ${esc(tips)} – choose versions and attachments (TIPS Exporter)"></button>`;
+      const dl = box.querySelector('.tipsx-rdl');
       box.addEventListener('click', e => e.stopPropagation());
-      cb.checked = !!S.sel[item.tipsId];
-      cb.addEventListener('change', () => { if (cb.checked) S.sel[item.tipsId] = { ...item, at: ++selSeq }; else delete S.sel[item.tipsId]; syncRows(); render(); });
-      dl.addEventListener('click', e => { e.preventDefault(); downloadRow(item); });
+      dl.addEventListener('click', e => { e.preventDefault(); downloadRow(item, dl); });
       card.appendChild(box); added = true;
     }
     return added;
   }
   function syncRows() {
     for (const box of document.querySelectorAll('.tipsx-row')) {
-      const id = box.dataset.tipsId, st = rowState[id] || 'idle', dl = box.querySelector('.tipsx-rdl'), cb = box.querySelector('input');
+      const id = box.dataset.tipsId, st = rowState[id] || 'idle', dl = box.querySelector('.tipsx-rdl');
       if (dl.dataset.state !== st) { dl.dataset.state = st; dl.innerHTML = pageSvg(TB_ICON[st], 20); }
-      if (cb.checked !== !!S.sel[id]) cb.checked = !!S.sel[id];
-      box.parentElement.classList.toggle('tipsx-picked', !!S.sel[id]);
     }
-    padLast();
   }
-  async function downloadRow(item) {
+  async function downloadRow(item, anchor) {
     if (rowState[item.tipsId] === 'busy') return;
+    if (pick) { const same = pick.item.tipsId === item.tipsId; closePick(null); if (same) return; }   // the icon toggles its picker
     const flash = (st, ms) => { rowState[item.tipsId] = st; syncRows(); setTimeout(() => { if (rowState[item.tipsId] === st) { delete rowState[item.tipsId]; syncRows(); } }, ms); };
-    if (busy() || (S.single && S.single.phase === 'looking')) { setMsg('Finish, resume or discard the current download first.'); return flash('error', 4000); }
+    const blocked = () => busy() || (S.single && S.single.phase === 'looking');
+    if (blocked()) { setMsg('Finish, resume or discard the current download first.'); return flash('error', 4000); }
     if (!sessionOK()) { setMsg('Session values missing – open ⚙ Settings.'); return flash('error', 4000); }
+    const opts = await chooseDownload(item, anchor);
+    if (!opts) return;
+    if (blocked()) { setMsg('Finish, resume or discard the current download first.'); return flash('error', 4000); }
     const keep = S.single && S.single.phase === 'looked' ? { single: S.single, liText } : null;
     rowState[item.tipsId] = 'busy'; syncRows();
-    S.single = { phase: 'looked', found: [item], problems: [] };
+    S.single = { phase: 'looked', found: [{ ...item, version: opts.doc.version || item.version, opts }], problems: [] };
     try {
       await downloadFound();
       if (S.single && S.single.phase === 'done') { flash('done', 5000); if (keep) { S.single = keep.single; liText = keep.liText; } }
@@ -1245,25 +1252,105 @@
     } catch (e) { flash('error', 6000); setMsg((e instanceof SessionError ? '⚠ ' : 'Error: ') + e.message); }
     render();
   }
-  function downloadSelected() {
-    const found = selList();
-    if (!found.length || busy()) return;
-    S.single = { phase: 'looked', found, problems: [] }; liText = '';
-    S.sel = {}; syncRows();
-    view = 'single'; showSettings = false;
-    openDrawer(true);
-    return downloadFound().catch(e => setMsg('Error: ' + e.message));
+  // Row download picker: a small TIPS-styled popup under the row's icon listing every version of the topic
+  // (newest first, with its date and change reason; the current one ticked) and whether to include attachments. Resolves with the
+  // choice {versions, att, allVers, dropAtt, doc} or null when closed.
+  const pickHost = document.createElement('div');
+  pickHost.style.cssText = host.style.cssText;
+  const proot = pickHost.attachShadow({ mode: 'open' });
+  let pick = null;   // {item, anchor, doc, err, vers: [{v, date, why}], sel: Set, att, resolve}
+  const fmtDate = d => { if (d == null || d === '') return ''; const t = new Date(/^\d+$/.test(String(d)) ? +d : d); return isNaN(t) ? String(d).slice(0, 10) : t.toLocaleDateString(); };
+  // Dates come from the revision history (the Published step). The change reason is part of each version's own
+  // topic data, so only the current one is known without another request per version; history entries are the fallback.
+  function versionList(doc, cur) {
+    const hist = (doc.history && doc.history.children) || [], out = [];
+    for (let n = cur; n >= 1; n--) {
+      const hs = hist.filter(h => +h.version === n), h = hs.find(x => x.flowId === 'PUB') || hs[hs.length - 1];
+      const why = ((n === cur && loc(doc.i18nChangeReason)) || hs.map(x => loc(x.i18nChangeReason)).find(Boolean) || '').replace(/\s+/g, ' ').trim();
+      out.push({ v: n, date: h ? fmtDate(h.creationDate) : '', why });
+    }
+    return out;
   }
-  function renderSelBar() {
-    const n = Object.keys(S.sel).length;
-    padLast();
-    if (!n) { root.innerHTML = ''; return; }
-    const names = selList().map(x => x.tips);
-    root.innerHTML = `<style>${css}</style><div class="selbar" role="region" aria-label="Selected topics">
-      <div class="bd"><b>${n} selected</b><span class="mut sm">${esc(names.slice(0, 3).join(', '))}${n > 3 ? ' …' : ''}</span></div>
-      <button class="b bar" id="selclear">Clear</button><button class="b pri" id="seldl" ${busy() ? 'disabled' : ''}>${I.dl}Download ${n}</button></div>`;
-    root.getElementById('selclear').onclick = () => { S.sel = {}; syncRows(); render(); };
-    root.getElementById('seldl').onclick = downloadSelected;
+  function chooseDownload(item, anchor) {
+    return new Promise(resolve => {
+      if (!pickHost.isConnected) document.documentElement.appendChild(pickHost);
+      pick = { item, anchor, doc: null, err: '', vers: [], sel: new Set(), att: true, resolve };
+      if (anchor) anchor.setAttribute('aria-expanded', 'true');
+      document.addEventListener('pointerdown', pickOutside, true);
+      window.addEventListener('keydown', pickKey, true);
+      window.addEventListener('resize', placePick); window.addEventListener('scroll', placePick, true);
+      renderPick('p_x');
+      const mine = () => pick && pick.item === item;
+      get(`/tips/topic-service/api/v1/topics/${item.tipsId}/${item.version}?${Q()}`, 'application/json')
+        .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+        .then(doc => { if (!mine()) return; pick.doc = doc; pick.vers = versionList(doc, doc.version || item.version); pick.sel = new Set([pick.vers[0].v]); renderPick('p_go'); })
+        .catch(e => { if (!mine()) return; pick.err = e instanceof SessionError ? `⚠ ${e.message} – log in to XENTRY again, then try once more.` : 'Could not read the versions: ' + e.message; renderPick('p_x'); });
+    });
+  }
+  function closePick(result) {
+    const p = pick; if (!p) return;
+    pick = null; proot.innerHTML = '';
+    document.removeEventListener('pointerdown', pickOutside, true);
+    window.removeEventListener('keydown', pickKey, true);
+    window.removeEventListener('resize', placePick); window.removeEventListener('scroll', placePick, true);
+    if (p.anchor) { p.anchor.setAttribute('aria-expanded', 'false'); if (p.anchor.isConnected) p.anchor.focus(); }
+    p.resolve(result);
+  }
+  function pickOutside(e) { const path = e.composedPath(); if (pick && !path.includes(pickHost) && !path.includes(pick.anchor)) closePick(null); }
+  function pickKey(e) {
+    if (!pick) return;
+    if (e.key === 'Escape') { e.stopPropagation(); e.preventDefault(); closePick(null); return; }
+    if (e.key === 'Tab') {   // keep focus inside the popup
+      const f = [...proot.querySelectorAll(FOCUSABLE)], a = proot.activeElement;
+      if (!f.length) return;
+      if (e.shiftKey && (a === f[0] || !a)) { e.preventDefault(); f.at(-1).focus(); }
+      else if (!e.shiftKey && (a === f.at(-1) || !a)) { e.preventDefault(); f[0].focus(); }
+    }
+  }
+  function placePick() {
+    const el = proot.querySelector('.pk'); if (!el || !pick) return;
+    const a = pick.anchor && pick.anchor.isConnected ? pick.anchor.getBoundingClientRect() : null;
+    const w = el.offsetWidth, h = el.offsetHeight, W = window.innerWidth, Hh = window.innerHeight;
+    let left = a ? a.right - w : (W - w) / 2, top = a ? a.bottom + 4 : (Hh - h) / 2;
+    if (a && top + h > Hh - 8) top = Math.max(8, a.top - 4 - h);
+    el.style.left = Math.round(Math.min(Math.max(16, left), W - w - 16)) + 'px'; el.style.top = Math.round(Math.max(8, top)) + 'px';
+  }
+  function renderPick(focusId) {
+    const p = pick; if (!p) return;
+    const it = p.item, d = p.doc, atts = d ? (d.attachments || []).length : 0, refs = d ? (d.references || []).length : 0;
+    const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
+    let body;
+    if (p.err) body = `<div class="ban er"><div class="bd sm">${esc(p.err)}</div></div>`;
+    else if (!d) body = `<div class="ld sm mut"><span class="acc spin">${svg('<circle cx="12" cy="12" r="8" stroke-opacity=".25"></circle><path d="M12 4a8 8 0 0 1 8 8"></path>', 16, 2.4)}</span>Reading versions…</div>`;
+    else body = `<div class="sp"><b>Versions</b><span class="sm"><button class="lk" id="p_all">All</button> · <button class="lk" id="p_cur">Current only</button></span></div>
+      <div class="vl" role="group" aria-label="Versions">${p.vers.map((x, i) => `<label class="ck vr"><input type="checkbox" data-v="${x.v}" ${p.sel.has(x.v) ? 'checked' : ''}>
+        <span class="bd"><span class="l1"><span>v${x.v}</span>${i === 0 ? '<span class="tag">current</span>' : ''}<span class="mut sm dt">${esc(x.date)}</span></span>
+        ${x.why ? `<span class="mut sm one" title="${esc(x.why)}">${esc(x.why)}</span>` : ''}</span></label>`).join('')}</div>
+      ${atts + refs ? `<label class="ck"><input type="checkbox" id="p_att" ${p.att ? 'checked' : ''}> Include ${atts && refs ? 'attachments and links' : atts ? 'attachments' : 'the links list'} <span class="mut sm">(${[atts && plural(atts, 'file'), refs && plural(refs, 'link')].filter(Boolean).join(', ')})</span></label>`
+        : '<span class="mut sm">This topic has no attachments or links.</span>'}`;
+    proot.innerHTML = `<style>${css}</style><div class="pk" role="dialog" aria-modal="false" aria-label="Download ${esc(it.tips)}">
+      <div class="phd"><div class="bd"><b>Download ${esc(it.tips)}</b><span class="mut sm one" title="${esc(it.title)}">${esc(it.title)}</span></div>
+        <button class="ib" id="p_x" aria-label="Close">${svg('<path d="M18 6L6 18"></path><path d="M6 6l12 12"></path>', 20, 1.5)}</button></div>
+      <div class="pbd">${body}</div>
+      <div class="pft"><button class="b bar" id="p_cancel">Cancel</button><button class="b pri" id="p_go" ${d ? '' : 'disabled'}>${I.dl}<span id="p_n"></span></button></div></div>`;
+    const $ = id => proot.getElementById(id), go = $('p_go');
+    const upd = () => {
+      const n = p.sel.size;
+      go.disabled = !d || !n;
+      $('p_n').textContent = !d ? 'Download' : !n ? 'Pick a version' : n === p.vers.length ? `Download all ${plural(n, 'version')}` : `Download ${plural(n, 'version')}`;
+    };
+    const setAll = vs => { p.sel = new Set(vs); for (const cb of proot.querySelectorAll('input[data-v]')) cb.checked = p.sel.has(+cb.dataset.v); upd(); };
+    $('p_x').onclick = $('p_cancel').onclick = () => closePick(null);
+    if (d) {
+      for (const cb of proot.querySelectorAll('input[data-v]')) cb.onchange = () => { if (cb.checked) p.sel.add(+cb.dataset.v); else p.sel.delete(+cb.dataset.v); upd(); };
+      $('p_all').onclick = () => setAll(p.vers.map(x => x.v));
+      $('p_cur').onclick = () => setAll([p.vers[0].v]);
+      if ($('p_att')) $('p_att').onchange = e => { p.att = e.target.checked; };
+      go.onclick = () => { if (!p.sel.size) return; const versions = [...p.sel].sort((a, b) => a - b);
+        closePick({ versions, att: !!(p.att && atts + refs), allVers: versions.length === p.vers.length, dropAtt: !p.att && atts + refs > 0, doc: d }); };
+    }
+    upd(); placePick();
+    const f = focusId && $(focusId); if (f && !f.disabled) f.focus();
   }
   let injectQueued = false;
   new MutationObserver(muts => {

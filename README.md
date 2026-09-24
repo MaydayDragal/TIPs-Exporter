@@ -31,11 +31,14 @@ There are four ways, and they all produce the same zip.
 
 **Use your current TIPS search.** Run a search in TIPS as usual (free text, function group, symptom, fault code…). The **Single LI** tab then offers **Your current TIPS search → Use search**, which lists every topic that search found (up to 300) ready to download. For bigger searches, narrow them down or use Bulk export.
 
-**From the search results.** Every row in the TIPS results list gets two small controls on its right edge:
-- the **download** icon saves that topic straight away;
-- the **tick box** selects it. A bar appears at the bottom of the page — **N selected · Clear · Download N** — which downloads all ticked topics together.
+**From the search results.** Every row in the TIPS results list gets a small **download** icon on its right edge. Clicking it opens a list of that topic's versions, newest first, with the date each was published (and the current version's reason for change):
+- the current version is ticked; tick older ones too, or use **All** / **Current only**;
+- untick **Include attachments** to leave out the attachments and links;
+- click **Download**. Esc, **Cancel** or clicking elsewhere closes the list without downloading.
 
-**From the open topic.** A download button (with a small blue dot) appears in the topic's toolbar next to **Print**. Hover to see what you'll get; click to download straight away.
+The zip name says what's inside, e.g. `TIPS_LI42.10-P-078779_v5.zip` (the current version), `…_v3_v5.zip` or `…_no-attachments.zip`. Picking every version with attachments saves `TIPS_LI42.10-P-078779.zip`.
+
+**From the open topic.** A download button (with a small blue dot) appears in the topic's toolbar next to **Print**. It opens the same list of versions.
 
 The zip is saved to your Downloads folder as `TIPS_LI42.10-P-078779.zip`, or `TIPS_selection_<date>_<n>docs.zip` for several. Entries that were skipped are listed (and written to `_errors.txt` in the zip); **Fix** puts them back in the box.
 
@@ -107,8 +110,8 @@ After updating, reload the extension and the TIPS tab, then check:
 
 1. **⋮ → TIPS Exporter** (and Alt+Shift+E) open the drawer.
 2. **⚙ → Check setup** shows ✓ for Session, Drawer position, ⋮ menu and TIPS fonts.
-3. Open a topic: the button next to **Print** saves `TIPS_<LI>.zip` for that topic.
-4. In the results list, the row download icon saves one topic; ticking two rows and **Download 2** saves both.
+3. Open a topic: the button next to **Print** lists its versions; **Download 1 version** saves `TIPS_<LI>_v<N>.zip`.
+4. In the results list, the row download icon lists the versions with the current one ticked; **Download 1 version** saves `TIPS_<LI>_v<N>.zip`.
 5. After a search, **Use search** lists its topics.
 6. In **Bulk export**, with batch size 2, prepare and approve a batch; the progress log updates.
 7. Reload TIPS: settings, progress and recent downloads are still there.

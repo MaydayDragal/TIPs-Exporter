@@ -93,7 +93,7 @@ const index = topics.map(t => ({ tips: t.tips, tipsId: t.tipsId, version: t.vers
   // Download
   e.$('dlfound').click();
   await waitFor(() => /in progress/.test(e.text()));
-  await waitFor(() => /Prior version v\d of 4/.test(e.text()));
+  await waitFor(() => /Prior version v\d – \d of 4/.test(e.text()));
   e.shot('3_downloading');
   ok(/● Downloading/.test(e.text()) && /queued/.test(e.text()), 'downloading view: status, current doc, queued doc');
   ok(/✓ Topic data & current PDF/.test(e.text()) && /✓ 2 attachments/.test(e.text()), 'step checklist ticks off finished steps');
