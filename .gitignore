@@ -12,3 +12,8 @@ _batch_*
 Thumbs.db
 desktop.ini
 .vscode/
+
+# Tests
+node_modules/
+tests/shots/
+package-lock.json

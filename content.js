@@ -30,6 +30,9 @@
     history: [],        // [{n, fname, sizeMB, docs, ok, att, prev, errors, date}]
     recent: [],         // single-LI downloads [{fname, tips: [..], v, sizeMB, docs, date}]
     single: null,       // single-LI flow: {phase: 'looking'|'looked'|'done', ...}
+    resume: null,       // a download interrupted by a lost session: {title, kind, remaining, carry, finish}
+    sel: {},            // search-result rows ticked for download: tipsId -> {tips, tipsId, version, title}
+    latest: {},         // newest versions seen by "Check for updates": tips -> version
     settings: { outlet: '', user: '', ver: '', batchSize: 25, delayMs: 2000, delayMaxMs: 5000, pageSize: 50, pageSizeSrc: 'default',
       autoApprove: false, autoContinue: true,
       files: { docJson: true, attCsv: true, histCsv: true, histJson: true, manifest: true } },
@@ -109,6 +112,9 @@
   const txt = s => enc.encode(s);
   const crcT = (() => { const t = new Uint32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; } return t; })();
   const crc32 = u8 => { let c = 0xFFFFFFFF; for (let i = 0; i < u8.length; i++) c = crcT[(c ^ u8[i]) & 0xFF] ^ (c >>> 8); return (c ^ 0xFFFFFFFF) >>> 0; };
+  // keep folder/file names short enough that extracted paths stay under Windows' 260-character limit
+  const clip = (s, n) => { s = String(s || '').replace(/[\\/:*?"<>|\x00-\x1F]/g, '_').replace(/\s+/g, ' ').trim().replace(/[. ]+$/, ''); if (s.length <= n) return s; const m = s.match(/^(.*?)(\.[A-Za-z0-9]{1,5})$/);
+    return (m && m[2].length < n ? m[1].slice(0, n - m[2].length).replace(/[. ]+$/, '') + m[2] : s.slice(0, n).replace(/[. ]+$/, '')); };
   const safe = s => String(s || '').replace(/[\\/:*?"<>|\x00-\x1F]/g, '_').replace(/\s+/g, ' ').trim().slice(0, 90).replace(/[. ]+$/, '');
   const csvEsc = v => '"' + String(v ?? '').replace(/"/g, '""') + '"';
   const loc = o => o ? (o.en || Object.values(o)[0] || '') : '';
@@ -258,7 +264,7 @@
 
   // ---------------------------------------------------------------- export one document
   async function exportDoc(item, files, errors, step) {
-    const base = `${safe(item.tips)} - ${safe(item.title)}`;
+    const base = `${safe(item.tips)} - ${clip(item.title, 45)}`;
     step('topic data', { g: 'data' });
     const jr = await get(`/tips/topic-service/api/v1/topics/${item.tipsId}/${item.version}?${Q()}`, 'application/json');
     if (!jr.ok) throw new Error('topic data HTTP ' + jr.status);
@@ -279,7 +285,7 @@
       const lines = ['type,filename_or_target,description,created'];
       const used = new Set();
       for (const [k, a] of atts.entries()) {
-        let fn = safe(a.filename || ('attachment_' + a.attId)); while (used.has(fn.toLowerCase())) fn = '_' + fn; used.add(fn.toLowerCase());
+        let fn = clip(a.filename || ('attachment_' + a.attId), 60); while (used.has(fn.toLowerCase())) fn = '_' + fn; used.add(fn.toLowerCase());
         lines.push([a.type, fn, loc(a.i18nDescription), a.creationDate].map(csvEsc).join(','));
         step(`attachment ${k + 1}/${atts.length}`, { g: 'att', k: k + 1, n: atts.length });
         try {
@@ -316,14 +322,20 @@
   }
 
   // ---------------------------------------------------------------- run documents -> zip
-  // Exports `items` one by one with pause/cancel support. Returns {files, errors, results} or null if stopped.
-  async function runDocs(title, items, kind = 'bulk') {
-    const files = [], errors = [], results = [];
-    S.run = { title, kind, items, results, i: 0, total: items.length, label: '', step: null, attN: 0, paused: false, cancel: false };
+  // Exports `items` one by one with pause/cancel support. Returns {files, errors, results, leftover} or null if stopped.
+  // A zip is held in memory until it is saved, so it stops at MAX_ZIP_MB; the rest comes back as `leftover`.
+  // If the session is lost, the finished documents are kept in S.resume and the run can continue after logging in.
+  const MAX_ZIP_MB = 400, capMB = () => +S.settings.maxZipMB || MAX_ZIP_MB;   // maxZipMB: hidden override (tests)
+  async function runDocs(title, items, kind = 'bulk', exporter = exportDoc, carry = null) {
+    const files = carry ? carry.files : [], errors = carry ? carry.errors : [], results = carry ? carry.results : [], all = carry ? carry.all : items;
+    let bytes = files.reduce((a, f) => a + f.data.length, 0), cur = 0, leftover = [];
+    S.run = { title, kind, items: all, results, i: results.length, total: all.length, label: '', step: null, attN: 0, paused: false, cancel: false };
     render();
     try {
       for (const [k, it] of items.entries()) {
-        if (k) {
+        cur = k;
+        if (bytes >= capMB() * 1048576) { leftover = items.slice(k); break; }
+        if (k || carry) {
           const until = Date.now() + randDelay();
           while (Date.now() < until && !S.run.cancel) {
             S.run.step = null; S.run.attN = 0;
@@ -334,27 +346,40 @@
         while (S.run.paused && !S.run.cancel) await sleep(400);
         if (S.run.cancel) throw new Error('cancelled');
         S.run.i++; S.run.label = it.tips; S.run.step = null; S.run.attN = 0; render();
+        const fMark = files.length, eMark = errors.length;
         try {
-          const r = await exportDoc(it, files, errors, (s, info) => {
+          const r = await exporter(it, files, errors, (s, info) => {
             S.run.label = `${it.tips} – ${s}`; S.run.step = info || null;
             if (info && info.g === 'att') S.run.attN = info.n;
-            if (S.run.kind === 'single') renderRunBox(); else renderProgress();
+            if (S.run.kind !== 'bulk') renderRunBox(); else renderProgress();
           });
+          for (let f = fMark; f < files.length; f++) bytes += files[f].data.length;
           results.push({ ...it, ...r, status: 'ok' });
         } catch (e) {
-          if (e instanceof SessionError) throw e;
+          if (e instanceof SessionError) { files.length = fMark; errors.length = eMark; throw e; }   // redo this document on resume
           results.push({ ...it, status: 'FAILED: ' + e.message }); errors.push(`${it.tips}: ${e.message}`);
         }
       }
     } catch (e) {
       S.run = null;
-      if (e instanceof SessionError) setMsg('⚠ ' + e.message + '. Log in to XENTRY again (keep this tab), then retry.');
-      else setMsg(e.message === 'cancelled' ? `${title} cancelled – nothing saved.` : `${title} failed: ` + e.message);
+      if (e instanceof SessionError) {
+        S.resume = { title, kind, exporter, remaining: items.slice(cur), carry: { files, errors, results, all }, finish: null };
+        setMsg(`⚠ ${e.message}. ${results.length} of ${all.length} done and kept – log in to XENTRY again in this tab, then click Resume.`);
+      } else setMsg(e.message === 'cancelled' ? `${title} cancelled – nothing saved.` : `${title} failed: ` + e.message);
       render(); return null;
     }
     S.run = null;
-    return { files, errors, results };
+    return { files, errors, results, leftover };
   }
+  const busy = () => !!(S.run || S.pending || S.resume);
+  async function resumeRun() {
+    const r = S.resume; if (!r || S.run) return;
+    S.resume = null; S.msg = '';
+    const out = await runDocs(r.title, r.remaining, r.kind, r.exporter, r.carry);
+    if (!out) { if (S.resume) S.resume.finish = r.finish; return; }
+    await r.finish(out);
+  }
+  function discardResume() { if (!S.resume) return; S.resume = null; setMsg('Interrupted download discarded – nothing saved.'); }
   function manifestCsv(results) {
     const man = ['tips,title,version,attachments_saved,attachments_listed,links,prior_versions_saved,history_events,status'];
     for (const r of results) man.push([r.tips, r.title, r.version, r.attachments, r.attachmentsListed, r.links, r.prevVersions, r.histEvents, r.status].map(csvEsc).join(','));
@@ -367,14 +392,17 @@
 
   // ---------------------------------------------------------------- bulk batch (next N pending docs)
   async function prepareBatch() {
-    if (S.run || S.pending) return;
+    if (busy()) return;
     if (!sessionOK()) { setMsg('Session values missing – open Settings and fill Outlet / User, or open any topic once so they can be detected.'); return; }
     const items = pendingItems().slice(0, S.settings.batchSize);
     if (!items.length) { setMsg('Everything in the index is exported.'); return; }
     const n = nextBatch();
     const out = await runDocs(`Batch ${n}`, items, 'bulk');
-    if (!out) return;
-    const { files, errors, results } = out;
+    if (!out) { if (S.resume) S.resume.finish = o => finishBatch(n, o); return; }
+    await finishBatch(n, out);
+  }
+  async function finishBatch(n, out) {
+    const { files, errors, results, leftover } = out;
     const now = new Date().toISOString();
     const provisional = { ...S.done };
     for (const r of results) if (r.status === 'ok') provisional[r.tipsId] = { b: n, d: now, v: r.version };
@@ -385,7 +413,7 @@
     const blob = makeZip(files);
     const fname = `TIPS_LI_Batch_${p}.zip`;
     S.pending = { kind: 'batch', n, blob, fname, results, summary: summarize(fname, blob, results, errors) };
-    setMsg(`Batch ${n} ready for review.`);
+    setMsg(leftover.length ? `Batch ${n} reached ${capMB()} MB after ${results.length} documents – ready for review. The other ${leftover.length} stay pending for the next batch.` : `Batch ${n} ready for review.`);
     render();
     if (S.settings.autoApprove) approve();
   }
@@ -437,9 +465,57 @@
     }
     return { found, problems };
   }
+  // The last topic search the Reader ran (recorded by the page probe), replayed page by page with our own paging.
+  const SEARCH_LIMIT = 300;
+  function readerSearch() { try { const b = document.documentElement.dataset.tipsxLastSearch; return b ? JSON.parse(b) : null; } catch (e) { return null; } }
+  function searchLabel(b) { const t = b && ['searchText', 'fullText', 'freeText', 'searchTerm', 'query', 'docName'].map(k => b[k]).find(v => typeof v === 'string' && v.trim()); return t ? `“${t.trim()}”` : ''; }
+  async function fetchReaderSearch() {
+    const base = readerSearch(); if (!base) throw new Error('Run a search in TIPS first.');
+    const size = S.settings.pageSize || 20, out = [], seen = new Set(); let total = 0;
+    for (let p = 1; p <= 200; p++) {
+      setMsg(`Reading your TIPS search… page ${p}${total ? ' of ' + Math.ceil(total / size) : ''}`);
+      const r = await fetch('/tips/topic-service/api/v1/topics/search?' + Q(), { method: 'POST', credentials: 'include', headers: H(), body: JSON.stringify({ ...base, totalHitsCountOnly: false, pagination: { pageNumber: p, pageSize: size } }) });
+      if (r.status === 401 || r.status === 403) throw new SessionError('Session expired (HTTP ' + r.status + ')');
+      if (!r.ok) throw new Error('Search failed: HTTP ' + r.status);
+      const j = await r.json(); total = j.totalHits || 0;
+      if (total > SEARCH_LIMIT) throw new Error(`Your TIPS search found ${fmtN(total)} topics – narrow it to ${SEARCH_LIMIT} or fewer, or use Bulk export.`);
+      if (!j.hits || !j.hits.length) break;
+      for (const h of j.hits) if (!seen.has(h.tipsId)) { seen.add(h.tipsId); out.push({ tips: h.tips, tipsId: h.tipsId, version: h.version, title: h.title, mdate: h.modificationDate }); }
+      if (p * size >= total) break;
+      await sleep(300);
+    }
+    S.msg = '';
+    return { found: out, total };
+  }
+  async function lookupReaderSearch() {
+    if (busy()) { setMsg('Finish, resume or discard the current download first.'); return; }
+    if (!sessionOK()) { setMsg('Session values missing – open ⚙ Settings.'); return; }
+    S.single = { phase: 'looking' }; render();
+    try { const { found, total } = await fetchReaderSearch(); S.single = { phase: 'looked', found, problems: [], fromSearch: { total, label: searchLabel(readerSearch()) } }; }
+    catch (e) { S.single = null; throw e; }
+    render();
+  }
+
+  // ---------------------------------------------------------------- 5: newer versions of recent downloads
+  const recentVers = r => r.vers || (r.docs === 1 && r.v != null ? { [r.tips[0]]: +r.v } : {});
+  const newestKnown = tips => { const i = S.index.find(x => x.tips === tips); return Math.max(S.latest[tips] || 0, i ? +i.version || 0 : 0); };
+  const recentUpdates = r => Object.entries(recentVers(r)).filter(([t, v]) => newestKnown(t) > v).map(([t, v]) => ({ tips: t, have: v, now: newestKnown(t) }));
+  async function checkRecentUpdates() {
+    if (busy()) { setMsg('Finish, resume or discard the current download first.'); return; }
+    const all = [...new Set(S.recent.flatMap(r => Object.keys(recentVers(r))))].slice(0, 40);
+    if (!all.length) return;
+    for (const [k, t] of all.entries()) {
+      setMsg(`Checking for newer versions… ${k + 1} of ${all.length}`);
+      const hit = await searchByNumber(t.toUpperCase());
+      if (hit) S.latest[t] = +hit.version;
+      await sleep(300);
+    }
+    const n = S.recent.reduce((a, r) => a + recentUpdates(r).length, 0);
+    setMsg(n ? `${n} of your recent downloads ${n === 1 ? 'has' : 'have'} a newer version in TIPS.` : 'All your recent downloads are up to date.');
+  }
   const selectionName = found => found.length === 1 ? `TIPS_${safe(found[0].tips)}.zip` : `TIPS_selection_${new Date().toISOString().slice(0, 10)}_${found.length}docs.zip`;
   async function lookupSpecific(text) {
-    if (S.run || S.pending) { setMsg('Finish or discard the bulk batch first.'); return; }
+    if (busy()) { setMsg('Finish, resume or discard the current download first.'); return; }
     if (!sessionOK()) { setMsg('Session values missing – open ⚙ Settings.'); return; }
     if (!text.trim()) { setMsg('Enter one or more LI numbers.'); return; }
     S.single = { phase: 'looking' }; render();
@@ -451,19 +527,23 @@
   }
   async function downloadFound() {
     const sg = S.single;
-    if (!sg || sg.phase !== 'looked' || !sg.found.length || S.run || S.pending) return;
-    const { found, problems } = sg;
-    const out = await runDocs(found.length === 1 ? found[0].tips : `${found.length} documents`, found, 'single');
-    if (!out) return;   // cancelled or session lost: runDocs set the message; the looked-up list stays
-    const { files, errors, results } = out;
+    if (!sg || sg.phase !== 'looked' || !sg.found.length || busy()) return;
+    const out = await runDocs(sg.found.length === 1 ? sg.found[0].tips : `${sg.found.length} documents`, sg.found, 'single');
+    if (!out) { if (S.resume) S.resume.finish = o => finishSingle(sg, o); return; }   // cancelled or session lost
+    await finishSingle(sg, out);
+  }
+  async function finishSingle(sg, out) {
+    const found = sg.found, { files, errors, results, leftover } = out;
+    const problems = [...sg.problems, ...leftover.map(it => ({ token: it.tips, kind: 'capped', text: `Not downloaded – the zip reached ${capMB()} MB. Download it separately.`, msg: `${it.tips}: not downloaded (zip size limit)` }))];
     if (S.settings.files.manifest) files.unshift({ name: `_manifest.csv`, data: txt(manifestCsv(results)) });
     if (errors.length || problems.length) files.unshift({ name: `_errors.txt`, data: txt([...problems.map(p => p.msg), ...errors].join('\r\n')) });
     const blob = makeZip(files);
-    const fname = selectionName(found);
+    const done = results.filter(r => r.status === 'ok'), fname = selectionName(found);
     saveBlob(blob, fname);   // explicit request -> download straight away; does not change bulk-export progress
     const sum = summarize(fname, blob, results, errors);
     S.single = { phase: 'done', fname, sum, problems };
-    S.recent.unshift({ fname, tips: found.map(f => f.tips), v: found.length === 1 ? found[0].version : null, sizeMB: sum.sizeMB, docs: found.length, date: new Date().toISOString() });
+    S.recent.unshift({ fname, tips: results.map(f => f.tips), v: results.length === 1 ? results[0].version : null, vers: Object.fromEntries(done.map(r => [r.tips, +r.version])),
+      sizeMB: sum.sizeMB, docs: results.length, date: new Date().toISOString() });
     S.recent = S.recent.slice(0, 10);
     await saveRecent();
     railFlash = Date.now() + 6000; setTimeout(render, 6100);
@@ -556,7 +636,11 @@
   details summary::-webkit-details-marker{display:none}
   pre{white-space:pre-wrap;font-size:12px;max-height:140px;overflow:auto;background:#fff;padding:6px;margin:6px 0 0}
   table{width:100%;border-collapse:collapse;font-size:13px;margin-top:8px} td,th{padding:6px 4px;border-bottom:1px solid var(--div);text-align:left} th{font-weight:700}
-  code{font-size:12px;color:var(--lab)}`;
+  code{font-size:12px;color:var(--lab)}
+  .selbar{--f:"Mercedes-Benz Corpo S Text Regular","XF CorpoS normal",Arial,sans-serif;--tx:#333333;--lab:#595959;--blue:#006EFF;--blueH:#0058cc;--bar:#dedede;--barB:#cdcdcd;--sh:0 1px 3px 0 rgba(0,0,0,.2);
+    position:fixed;left:50%;bottom:24px;transform:translateX(-50%);display:flex;align-items:center;gap:12px;padding:10px 10px 10px 18px;background:#fff;border:1px solid #7a7a7a;
+    box-shadow:0 8px 24px rgba(0,0,0,.3);font:14px/1.4 var(--f);color:var(--tx);max-width:calc(100vw - 32px)}
+  .selbar .bd{display:flex;flex-direction:column;min-width:0} .selbar .mut{color:var(--lab);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:360px}`;
   const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
   function setMsg(m) { S.msg = m; render(); }
   // top of the drawer = bottom of the Reader's black header
@@ -624,7 +708,7 @@
   // ---- single LI  (each view returns {body, actions})
   function vSingle() {
     const sg = S.single, run = S.run && S.run.kind === 'single' ? S.run : null;
-    const blocked = !!(S.run || S.pending), F = S.settings.files;
+    const blocked = busy(), F = S.settings.files;
     if (run) return { body: `<div id="runbox">${vSingleRun(run)}</div>`, actions: `<button class="b dan" id="cancel">${I.x}Cancel download</button>` };
     if (sg && sg.phase === 'done') return vSingleDone(sg);
     const looking = sg && sg.phase === 'looking', looked = sg && sg.phase === 'looked';
@@ -633,7 +717,11 @@
         ${looked ? '' : '<span class="mut">Full numbers, or a unique ending such as 078779 once the index is built. Separate several with spaces, commas or new lines. Ctrl+Enter looks them up.</span>'}</div>`;
     if (looked) body += vLooked(sg);
     else body += `<span class="mut">Includes the current PDF, every prior version, attachments${F.histCsv || F.histJson ? ', revision history' : ''}${F.attCsv ? ' and the links list' : ''}.</span>`
-      + (blocked ? '<span class="alc">A bulk batch is running or waiting for approval – finish or discard it first.</span>' : '');
+      + (blocked ? '<span class="alc">A download is running, waiting for approval or waiting to be resumed – finish it first.</span>' : '');
+    const rs = !looked && readerSearch();
+    if (rs) body += `<div class="card"><div class="bd"><b>Your current TIPS search${searchLabel(rs) ? ' ' + esc(searchLabel(rs)) : ''}</b>
+        <span class="mut sm">Download every topic it found (up to ${SEARCH_LIMIT}), with all versions and attachments.</span></div>
+        <button class="b bar" id="cursearch" ${blocked || looking ? 'disabled' : ''}>Use search</button></div>`;
     body += vRecent(sg);
     const actions = looked
       ? `<button class="b bar" id="clear">Clear</button><button class="b pri" id="dlfound" ${sg.found.length ? '' : 'disabled'}>${I.dl}Download ${sg.found.length || ''}</button>`
@@ -642,7 +730,8 @@
   }
   function vLooked(sg) {
     const n = sg.found.length + sg.problems.length;
-    return `<div class="cnt">Found in TIPS : <span class="badge">${sg.found.length}</span><span class="mut" style="font-size:14px">of ${n} entr${n === 1 ? 'y' : 'ies'}</span></div>
+    return (sg.fromSearch ? `<div class="cnt">From your TIPS search${sg.fromSearch.label ? ' ' + esc(sg.fromSearch.label) : ''} : <span class="badge">${sg.found.length}</span><span class="mut" style="font-size:14px">topic${sg.found.length === 1 ? '' : 's'}</span></div>`
+      : `<div class="cnt">Found in TIPS : <span class="badge">${sg.found.length}</span><span class="mut" style="font-size:14px">of ${n} entr${n === 1 ? 'y' : 'ies'}</span></div>`) + `
       ${sg.found.map(f => `<div class="card"><span class="okc ic">${svg('<path d="M20 6L9 17l-5-5"></path>', 20, 2.2)}</span><div class="bd">
         <div class="sp"><span>${esc(f.tips)}</span><span class="mut sm">v${esc(f.version)} · ${Math.max(0, f.version - 1)} prior</span></div>
         <span>${esc(f.title)}</span>${f.src ? `<span class="mut sm">from “${esc(f.src)}”</span>` : ''}</div></div>`).join('')}
@@ -681,12 +770,14 @@
   }
   function vRecent(sg) {
     if (!S.recent.length) return '';
-    const blocked = !!(S.run || S.pending);
-    return `<div class="sec" style="padding-top:8px"><h3>Recent downloads</h3>
+    const blocked = busy();
+    return `<div class="sec" style="padding-top:8px"><div class="sp" style="align-items:center"><h3>Recent downloads</h3><button class="b bar sm" id="rcheck" ${blocked ? 'disabled' : ''}>${I.redo}Check for updates</button></div>
       ${S.recent.slice(0, 5).map((r, k) => {
-        const name = r.docs === 1 ? r.tips[0] : `${r.docs} documents`;
+        const name = r.docs === 1 ? r.tips[0] : `${r.docs} documents`, upd = recentUpdates(r);
         const meta = (r.docs === 1 ? `v${r.v} · ` : `${r.tips.slice(0, 2).join(', ')}${r.docs > 2 ? ' …' : ''} · `) + `${r.sizeMB} MB · ${when(r.date)}`;
-        return `<div class="card${k === 0 && sg && sg.phase === 'done' && sg.fname === r.fname ? ' sel' : ''}"><div class="bd"><span>${esc(name)}</span><span class="mut sm">${esc(meta)}</span></div>
+        const note = upd.length ? `<span class="alc sm">${upd.length === 1 ? `Newer version in TIPS: ${esc(upd[0].tips)} v${upd[0].now} (you have v${upd[0].have})` : `${upd.length} documents have a newer version in TIPS`}</span>` : '';
+        return `<div class="card${k === 0 && sg && sg.phase === 'done' && sg.fname === r.fname ? ' sel' : ''}"><div class="bd"><span>${esc(name)}</span><span class="mut sm">${esc(meta)}</span>${note}</div>
+          ${upd.length ? `<button class="b pri sm" data-upd="${k}" ${blocked ? 'disabled' : ''}>Download update</button>` : ''}
           <button class="b bar" style="width:40px;padding:0" data-redo="${k}" aria-label="Download ${esc(name)} again" title="Look up again" ${blocked ? 'disabled' : ''}>${I.redo}</button></div>`;
       }).join('')}</div>`;
   }
@@ -780,7 +871,7 @@
 
   function render() {
     syncRail();
-    if (!visible) { root.innerHTML = ''; syncToolbar(); return; }
+    if (!visible) { renderSelBar(); syncToolbar(); syncRows(); return; }
     // keep typing focus and scroll position across re-renders
     const ae = root.activeElement, focusLi = ae && ae.id === 'li', selA = focusLi ? ae.selectionStart : 0, selB = focusLi ? ae.selectionEnd : 0;
     const oldBody = root.querySelector('.body'), scroll = oldBody && lastView === view ? oldBody.scrollTop : 0; lastView = view;
@@ -788,6 +879,11 @@
     const status = run ? (run.kind === 'single' ? '<span class="st acc">● Downloading</span>' : run.paused ? `<span class="st alc">● ${esc(run.title)} paused</span>` : `<span class="st acc">● ${esc(run.title)} running</span>`)
       : S.pending ? '<span class="st okc">● Awaiting approval</span>' : view === 'single' && S.single && S.single.phase === 'done' ? '<span class="st okc">● Saved</span>' : '';
     const v = showSettings ? vSettings() : view === 'bulk' ? vBulk() : vSingle();
+    if (S.resume && !S.run) {   // an interrupted download waits for the user, whatever tab is open
+      const r = S.resume, done = r.carry.results.length, total = r.carry.all.length;
+      v.body = banner('al', `${r.kind === 'bulk' ? esc(r.title) : 'Download'} interrupted – ${done} of ${total} done`, '<span>Your XENTRY session ended. Log in again in this tab (keep it open), then click Resume to continue where it stopped. Nothing is lost.</span>') + v.body;
+      v.actions = '<button class="b bar" id="rdiscard">Discard</button><button class="b pri" id="resume">Resume</button>';
+    }
     root.innerHTML = `<style>${css}</style><div class="dim" id="dim" style="top:${T}px"></div>
       <aside class="dr${justOpened ? ' anim' : ''}" role="dialog" aria-modal="true" aria-label="TIPS Exporter" style="top:${T}px">
         <div class="hd"><div class="ttl"><h2>TIPS Exporter</h2>${status}</div>
@@ -827,6 +923,11 @@
     // run controls
     on('pause', 'onclick', () => { S.run.paused = !S.run.paused; render(); });
     on('cancel', 'onclick', cancelRun);
+    on('resume', 'onclick', safeRun(resumeRun));
+    on('rdiscard', 'onclick', discardResume);
+    on('cursearch', 'onclick', safeRun(lookupReaderSearch));
+    on('rcheck', 'onclick', safeRun(checkRecentUpdates));
+    root.querySelectorAll('[data-upd]').forEach(b => b.onclick = () => { const r = S.recent[+b.dataset.upd]; if (!r) return; liText = recentUpdates(r).map(u => u.tips).join('\n'); S.single = null; lookup(); });
 
     // bulk
     on('approve', 'onclick', safeRun(approve));
@@ -900,6 +1001,7 @@
     if (S.run && S.run.kind === 'single') return `${Math.min(S.run.results.length + 1, S.run.total)} of ${S.run.total}…`;
     if (S.run) return `${S.run.title} · ${S.run.i}/${S.run.total}`;
     if (S.pending) return 'Ready to approve';
+    if (S.resume) return 'Interrupted – resume';
     if (Date.now() < railFlash) return '✓ Saved';
     return '';
   }
@@ -924,7 +1026,7 @@
   }
   function syncRail() {
     const aux = document.getElementById('auxMenu0') || document.querySelector('footer xy-c-aux-menu');
-    const kind = !visible && S.run ? 'busy' : !visible && S.pending ? 'wait' : Date.now() < railFlash ? 'done' : '';
+    const kind = !visible && S.run ? 'busy' : !visible && (S.pending || S.resume) ? 'wait' : Date.now() < railFlash ? 'done' : '';
     if (aux) {
       let bd = aux.querySelector(':scope > .tipsx-rbadge');
       if (!kind) { if (bd) bd.remove(); }
@@ -962,7 +1064,16 @@
   .tipsx-mi-st{margin-left:auto;padding-left:16px;font-size:12px;color:#006EFF}
   .tipsx-rbadge{position:absolute;top:4px;right:4px;min-width:18px;height:18px;padding:0 4px;box-sizing:border-box;border-radius:9px;display:flex;align-items:center;justify-content:center;
     background:#006EFF;color:#fff;font:700 11px/1 Arial,sans-serif;pointer-events:none;z-index:1}
-  .tipsx-rbadge[data-kind=done]{background:#018601}`;
+  .tipsx-rbadge[data-kind=done]{background:#018601}
+  .tipsx-row{position:absolute;right:10px;top:50%;transform:translateY(-50%);display:flex;align-items:center;gap:2px;z-index:2}
+  .tipsx-sel{display:inline-flex;width:36px;height:36px;align-items:center;justify-content:center;cursor:pointer}
+  .tipsx-sel input{appearance:none;-webkit-appearance:none;width:18px;height:18px;margin:0;border:1px solid #7a7a7a;background:#fff;display:inline-grid;place-content:center;cursor:pointer}
+  .tipsx-sel input::after{content:'';width:4px;height:9px;margin-top:-2px;border:solid #fff;border-width:0 2px 2px 0;transform:rotate(45deg) scale(0)}
+  .tipsx-sel input:checked{background:#006EFF;border-color:#006EFF} .tipsx-sel input:checked::after{transform:rotate(45deg) scale(1)}
+  .tipsx-sel input:focus-visible,.tipsx-rdl:focus-visible{outline:2px solid #006EFF;outline-offset:2px}
+  .tipsx-rdl{width:36px;height:36px;display:inline-flex;align-items:center;justify-content:center;border:0;background:transparent;color:#595959;cursor:pointer;padding:0}
+  .tipsx-rdl:hover{background:#e6f1ff;color:#006EFF} .tipsx-rdl[data-state=busy]{color:#006EFF;cursor:progress} .tipsx-rdl[data-state=done]{color:#018601} .tipsx-rdl[data-state=error]{color:#EA060A}
+  xy-c-card-table-card.tipsx-picked > button{box-shadow:inset 3px 0 0 #006EFF}`;
   const pageSvg = (d, n) => `<svg width="${n}" height="${n}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${d}</svg>`;
   const TB_ICON = {
     idle: '<path d="M12 3v12"></path><path d="M7 10l5 5 5-5"></path><path d="M5 21h14"></path>',
@@ -1016,6 +1127,7 @@
     const settle = (state, msg, ms) => { tb.state = state; tb.msg = msg; syncToolbar(); setTimeout(() => { if (tb.state === state) { tb.state = 'idle'; syncToolbar(); } }, ms); };
     const t = openTopic();
     if (!t) return settle('error', "Couldn't tell which topic is open – use the panel instead.", 6000);
+    if (S.resume) return settle('error', 'A download was interrupted – open TIPS Exporter to resume or discard it first.', 6000);
     if (S.pending || (S.run && S.run.kind === 'bulk')) return settle('error', 'A bulk batch is running or waiting for approval – finish or discard it first.', 6000);
     if (S.run || (S.single && S.single.phase === 'looking')) return settle('error', 'Another download is running – wait for it to finish.', 6000);
     if (!sessionOK()) return settle('error', 'Session not detected – open the panel and check ⚙ Settings.', 6000);
@@ -1064,15 +1176,85 @@
       added = true;
     }
     if (injectMenu()) added = true;
-    if (added) { syncToolbar(); syncRail(); }
+    if (injectRows()) added = true;
+    if (added) { syncToolbar(); syncRail(); syncRows(); }
+  }
+  // Each topic in the search results is a card <xy-c-card-table-card id="card-<topicId>_<version>_P"> holding one big button.
+  // Our controls sit beside that button (not inside it) at the right edge of the card.
+  const ROW_RE = /^card-(\d+)_(\d+)_P$/, rowState = {};
+  function injectRows() {
+    let added = false;
+    for (const card of document.querySelectorAll('xy-c-card-table-card[id^="card-"]')) {
+      const m = card.id.match(ROW_RE), btn = card.querySelector(':scope > button');
+      if (!m || !btn || card.querySelector(':scope > .tipsx-row')) continue;
+      const cols = btn.querySelectorAll('xy-c-card-column');
+      const tips = ((cols[0] && cols[0].textContent.match(LI_RE)) || btn.textContent.match(LI_RE) || [])[0];
+      if (!tips) continue;
+      const item = { tips, tipsId: m[1], version: +m[2], title: cols[1] ? cols[1].textContent.trim() : '' };
+      if (getComputedStyle(card).position === 'static') card.style.position = 'relative';
+      btn.style.paddingRight = '92px';
+      const box = document.createElement('div');
+      box.className = 'tipsx-row'; box.dataset.tipsId = item.tipsId;
+      box.innerHTML = `<label class="tipsx-sel" title="Select for download"><input type="checkbox" aria-label="Select ${esc(tips)} for download"></label>`
+        + `<button type="button" class="tipsx-rdl" aria-label="Download ${esc(tips)} with all versions" title="Download ${esc(tips)} with all versions, attachments and links (TIPS Exporter)"></button>`;
+      const cb = box.querySelector('input'), dl = box.querySelector('.tipsx-rdl');
+      box.addEventListener('click', e => e.stopPropagation());
+      cb.checked = !!S.sel[item.tipsId];
+      cb.addEventListener('change', () => { if (cb.checked) S.sel[item.tipsId] = item; else delete S.sel[item.tipsId]; syncRows(); render(); });
+      dl.addEventListener('click', e => { e.preventDefault(); downloadRow(item); });
+      card.appendChild(box); added = true;
+    }
+    return added;
+  }
+  function syncRows() {
+    for (const box of document.querySelectorAll('.tipsx-row')) {
+      const id = box.dataset.tipsId, st = rowState[id] || 'idle', dl = box.querySelector('.tipsx-rdl'), cb = box.querySelector('input');
+      if (dl.dataset.state !== st) { dl.dataset.state = st; dl.innerHTML = pageSvg(TB_ICON[st], 20); }
+      if (cb.checked !== !!S.sel[id]) cb.checked = !!S.sel[id];
+      box.parentElement.classList.toggle('tipsx-picked', !!S.sel[id]);
+    }
+  }
+  async function downloadRow(item) {
+    if (rowState[item.tipsId] === 'busy') return;
+    const flash = (st, ms) => { rowState[item.tipsId] = st; syncRows(); setTimeout(() => { if (rowState[item.tipsId] === st) { delete rowState[item.tipsId]; syncRows(); } }, ms); };
+    if (busy() || (S.single && S.single.phase === 'looking')) { setMsg('Finish, resume or discard the current download first.'); return flash('error', 4000); }
+    if (!sessionOK()) { setMsg('Session values missing – open ⚙ Settings.'); return flash('error', 4000); }
+    const keep = S.single && S.single.phase === 'looked' ? { single: S.single, liText } : null;
+    rowState[item.tipsId] = 'busy'; syncRows();
+    S.single = { phase: 'looked', found: [item], problems: [] };
+    try {
+      await downloadFound();
+      if (S.single && S.single.phase === 'done') { flash('done', 5000); if (keep) { S.single = keep.single; liText = keep.liText; } }
+      else flash('error', 6000);
+    } catch (e) { flash('error', 6000); setMsg((e instanceof SessionError ? '⚠ ' : 'Error: ') + e.message); }
+    render();
+  }
+  function downloadSelected() {
+    const found = Object.values(S.sel);
+    if (!found.length || busy()) return;
+    S.single = { phase: 'looked', found, problems: [] }; liText = '';
+    S.sel = {}; syncRows();
+    view = 'single'; showSettings = false;
+    openDrawer(true);
+    return downloadFound().catch(e => setMsg('Error: ' + e.message));
+  }
+  function renderSelBar() {
+    const n = Object.keys(S.sel).length;
+    if (!n) { root.innerHTML = ''; return; }
+    const names = Object.values(S.sel).map(x => x.tips);
+    root.innerHTML = `<style>${css}</style><div class="selbar" role="region" aria-label="Selected topics">
+      <div class="bd"><b>${n} selected</b><span class="mut sm">${esc(names.slice(0, 3).join(', '))}${n > 3 ? ' …' : ''}</span></div>
+      <button class="b bar" id="selclear">Clear</button><button class="b pri" id="seldl" ${busy() ? 'disabled' : ''}>${I.dl}Download ${n}</button></div>`;
+    root.getElementById('selclear').onclick = () => { S.sel = {}; syncRows(); render(); };
+    root.getElementById('seldl').onclick = downloadSelected;
   }
   let injectQueued = false;
   new MutationObserver(muts => {
-    if (injectQueued || muts.every(m => m.target.closest && m.target.closest('.tipsx-dlwrap, .tipsx-rbadge, .tipsx-menuitem'))) return;   // ignore our own updates
+    if (injectQueued || muts.every(m => m.target.closest && m.target.closest('.tipsx-dlwrap, .tipsx-rbadge, .tipsx-menuitem, .tipsx-row'))) return;   // ignore our own updates
     injectQueued = true; requestAnimationFrame(injectToolbar);
   }).observe(document.documentElement, { childList: true, subtree: true });
 
-  window.addEventListener('beforeunload', e => { if (S.run || S.pending) { e.preventDefault(); e.returnValue = ''; } });
+  window.addEventListener('beforeunload', e => { if (S.run || S.pending || S.resume) { e.preventDefault(); e.returnValue = ''; } });
   if (hasChrome && chrome.runtime && chrome.runtime.onMessage) {
     chrome.runtime.onMessage.addListener((m, _s, reply) => { if (m && m.type === 'toggle') openDrawer(!visible); reply && reply(true); });
   }

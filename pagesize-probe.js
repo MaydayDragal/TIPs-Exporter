@@ -1,6 +1,6 @@
-/* TIPS Exporter – page-size probe (runs in the page's own JS world, before the Reader loads).
- * Watches the Reader's own topic-search requests and records the pagination.pageSize it uses,
- * so the exporter's index search can match it. Read-only: requests are passed through unchanged.
+/* TIPS Exporter – page probe (runs in the page's own JS world, before the Reader loads).
+ * Watches the Reader's own topic-search requests and records the pagination.pageSize it uses (so the exporter's
+ * index search can match it) and the last search itself (for "Use search"). Read-only: requests pass through unchanged.
  */
 (() => {
   if (window.__TIPSX_PROBE__) return;
@@ -13,6 +13,7 @@
       const n = j && j.pagination && j.pagination.pageSize;
       if (!Number.isInteger(n) || n < 1 || j.totalHitsCountOnly) return;
       document.documentElement.dataset.tipsxPageSize = String(n);   // DOM is shared with the content script
+      if (!j.docName) document.documentElement.dataset.tipsxLastSearch = body;   // the user's own search (not a single-LI lookup)
       window.postMessage({ __tipsx: 'pageSize', size: n }, location.origin);
     } catch (e) { }
   }

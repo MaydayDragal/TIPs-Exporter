@@ -1,11 +1,14 @@
 {
   "manifest_version": 3,
   "name": "TIPS Exporter",
-  "version": "1.6.1",
+  "version": "1.7.0",
   "minimum_chrome_version": "111",
   "description": "Download XENTRY TIPS Reader topics – specific LIs or batch-export (current PDF, attachments, links, revision history and prior versions) to zips, with per-batch approval and a resumable log.",
   "permissions": ["storage", "unlimitedStorage"],
   "host_permissions": ["https://xentry.mercedes-benz.com/*"],
+  "commands": {
+    "_execute_action": { "suggested_key": { "default": "Alt+Shift+E" }, "description": "Open or close TIPS Exporter" }
+  },
   "background": { "service_worker": "background.js" },
   "action": {
     "default_title": "TIPS Exporter – open/close",
