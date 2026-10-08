@@ -1,31 +1,68 @@
 {
   "manifest_version": 3,
   "name": "TIPS Exporter",
-  "version": "1.8.0",
+  "version": "1.15.0",
   "minimum_chrome_version": "111",
-  "description": "Download XENTRY TIPS Reader topics – specific LIs or batch-export (current PDF, attachments, links, revision history and prior versions) to zips, with per-batch approval and a resumable log.",
-  "permissions": ["storage", "unlimitedStorage"],
-  "host_permissions": ["https://xentry.mercedes-benz.com/*"],
+  "description": "Export XENTRY TIPS PDFs, prior versions, attachments and logs to ZIPs, with local PDF text/metadata scrubbing and resumable batches.",
+  "permissions": [
+    "storage",
+    "unlimitedStorage"
+  ],
+  "host_permissions": [
+    "https://xentry.mercedes-benz.com/*"
+  ],
   "commands": {
-    "_execute_action": { "suggested_key": { "default": "Alt+Shift+E" }, "description": "Open or close TIPS Exporter" }
+    "_execute_action": {
+      "suggested_key": {
+        "default": "Alt+Shift+E"
+      },
+      "description": "Open or close TIPS Exporter"
+    }
   },
-  "background": { "service_worker": "background.js" },
+  "background": {
+    "service_worker": "background.js"
+  },
   "action": {
-    "default_title": "TIPS Exporter – open/close",
-    "default_icon": { "16": "icons/icon16.png", "32": "icons/icon32.png", "48": "icons/icon48.png", "128": "icons/icon128.png" }
+    "default_title": "TIPS Exporter \u2013 open/close",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
   },
-  "icons": { "16": "icons/icon16.png", "32": "icons/icon32.png", "48": "icons/icon48.png", "128": "icons/icon128.png" },
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
   "content_scripts": [
     {
-      "matches": ["https://xentry.mercedes-benz.com/tips-reader/*"],
-      "js": ["pagesize-probe.js"],
+      "matches": [
+        "https://xentry.mercedes-benz.com/tips-reader/*"
+      ],
+      "js": [
+        "pagesize-probe.js"
+      ],
       "run_at": "document_start",
       "world": "MAIN"
     },
     {
-      "matches": ["https://xentry.mercedes-benz.com/tips-reader/*"],
-      "js": ["content.js"],
+      "matches": [
+        "https://xentry.mercedes-benz.com/tips-reader/*"
+      ],
+      "js": [
+        "vendor/pdf-lib.min.js",
+        "pdf-scrubber.js",
+        "index-csv.js",
+        "content.js"
+      ],
       "run_at": "document_idle"
     }
-  ]
+  ],
+  "options_ui": {
+    "page": "folder-settings.html",
+    "open_in_tab": true
+  }
 }

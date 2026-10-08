@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Index folder · TIPS Exporter</title><link rel="stylesheet" href="folder-settings.css"></head>
+<body><main>
+  <header><div class="eyebrow">TIPS EXPORTER <span id="version"></span></div><h1>Index folder</h1><p>Keep your topic index and export progress in one folder. Future installations can select the same folder to continue.</p></header>
+  <section aria-labelledby="current-title"><h2 id="current-title">Current location</h2><p id="current-location">Reading settings…</p><p id="folder-status" role="status" aria-live="polite"></p>
+    <div class="buttons"><button id="sync-now">Check &amp; sync</button><button id="allow-access">Allow folder access</button><button id="reload-index">Reload folder index</button><button id="disconnect">Disconnect</button></div>
+    <p class="hint">Reload folder index replaces the browser's cached index and progress with the selected file. Use it to adopt changes from another installation.</p>
+  </section>
+  <section aria-labelledby="choose-title"><h2 id="choose-title">Choose or change folder</h2><button id="choose-folder" class="primary" disabled>Choose folder…</button><p id="chosen-folder" class="hint">Select a permanent folder outside the extension's installation folder.</p>
+    <label for="index-filename">Index filename</label><input id="index-filename" list="index-files" value="_progress_log_all_documents.csv" spellcheck="false" autocomplete="off"><datalist id="index-files"></datalist>
+    <p class="hint">Choose an existing progress CSV from the list, or enter a new CSV filename. An existing file is loaded; a new file starts with your current browser progress.</p>
+    <button id="use-folder" class="primary" disabled>Use this folder and index</button>
+  </section>
+  <p id="result" role="status" aria-live="polite"></p>
+  <footer>Changes to the index and approved batch progress are saved automatically. PDFs and ZIP downloads continue to use your browser's download location. Chrome may ask you to allow folder access again after restarting or installing another copy.</footer>
+</main><script src="folder-db.js"></script><script src="index-csv.js"></script><script src="index-folder.js"></script><script src="folder-settings.js"></script></body></html>

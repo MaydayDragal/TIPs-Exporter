@@ -2,6 +2,11 @@
   "name": "tips-exporter",
   "private": true,
   "description": "Test runner for the TIPS Exporter Chrome extension (the extension itself needs no build).",
-  "scripts": { "test": "node tests/run-all.js" },
-  "devDependencies": { "jsdom": "^24.1.0" }
+  "scripts": {
+    "test": "node tests/run-all.js"
+  },
+  "devDependencies": {
+    "fake-indexeddb": "^6.2.5",
+    "jsdom": "^24.1.0"
+  }
 }

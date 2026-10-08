@@ -58,7 +58,9 @@ function makeEnv(extra = {}, body = '', settings = {}) {
   w.confirm = () => true; w.fetch = fakeFetch;
   const pm = w.postMessage.bind(w);
   w.postMessage = (d, o) => { if (d && d.__tipsx) setTimeout(() => w.dispatchEvent(new w.MessageEvent('message', { data: d, source: w })), 0); else pm(d, o); };
-  w.eval(probe); w.eval(content);
+  // These legacy endpoint fixtures use zero-filled dummy PDFs; real scrubbing is covered by pdf-scrub.test.js.
+  st.settings = { pdfScrub: { enabled: false }, ...st.settings };
+  w.eval(probe); w.eval(fs.readFileSync(require('path').join(__dirname, '..', 'index-csv.js'), 'utf8')); w.eval(content);
   const root = () => [...w.document.documentElement.children].find(e => e.shadowRoot).shadowRoot;
   const env = { w, st, saved, root, $: id => root().getElementById(id) };
   env.text = () => { const r = root().querySelector('.dr, .selbar'); if (!r) return ''; const tw = w.document.createTreeWalker(r, 4), a = []; while (tw.nextNode()) if (tw.currentNode.parentElement.tagName !== 'STYLE') a.push(tw.currentNode.textContent); return a.join(' ').replace(/\s+/g, ' '); };
@@ -89,7 +91,7 @@ const IDX = T.map(t => ({ tips: t.tips, tipsId: t.tipsId, version: t.version, ti
     e.$('dlfound').click(); await waitFor(() => /Saved to Downloads/.test(e.text()));
     const names = await unzip(e.w, e.saved.at(-1).blob), longest = Math.max(...names.map(n => n.length));
     console.log('     longest path in zip: ' + longest + ' chars · ' + names.find(n => n.includes('Attachments')));
-    ok(names.every(n => n.split('/')[0].length <= 64) && longest <= 150, `zip paths stay short (longest ${longest} chars; folder ≤ 64)`);
+    ok(names.every(n => n.split('/')[0].length <= 76) && longest <= 162, `zip paths stay short (longest ${longest} chars; folder ≤ 76 including Requested label)`);
     ok(names.some(n => /Attachments and Links\/Wiring diagram for power steering control unit N68[^/]*\.pdf$/.test(n) && n.split('/').pop().length <= 60), 'long attachment names are shortened and keep their .pdf extension');
   }
   // ---- 1: zip size cap (lowered to 1 MB for the test; 600 KB PDFs)
@@ -199,7 +201,7 @@ const IDX = T.map(t => ({ tips: t.tips, tipsId: t.tipsId, version: t.version, ti
     P('p_go').click();
     await waitFor(() => icon(0).dataset.state === 'done');
     const z1 = await unzip(e.w, e.saved.at(-1).blob), pdf1 = z1.filter(n => n.endsWith('.pdf')).map(n => n.split('/').pop()).sort();
-    ok(e.saved.at(-1).name === 'TIPS_LI42.10-P-078779_v3_v5.zip' && pdf1.join() === 'LI42.10-P-078779_v3.pdf,LI42.10-P-078779_v5.pdf', 'saves only the picked versions: ' + e.saved.at(-1).name + ' · ' + pdf1.join(' '));
+    ok(e.saved.at(-1).name === 'LI42.10-P-078779 - Brake vibration from 60MPH – Diagnostic Guide_v3_v5.zip' && pdf1.join() === 'LI42.10-P-078779_v3.pdf,LI42.10-P-078779_v5.pdf', 'saves only the picked versions: ' + e.saved.at(-1).name + ' · ' + pdf1.join(' '));
     ok(log.slice(before).filter(x => x.kind === 'pdf').map(x => x.v).sort().join() === '3,5' && log.filter(x => x.kind === 'data').length === dataReads, 'only those 2 PDFs are requested; the topic data is not read twice');
     ok(!pk() && rowClicked === 0 && e.w.document.activeElement === icon(0), 'picker closes, focus is back on the row icon; the row was never opened');
     // attachments off
@@ -208,16 +210,16 @@ const IDX = T.map(t => ({ tips: t.tips, tipsId: t.tipsId, version: t.version, ti
     P('p_att').click(); P('p_go').click();
     await waitFor(() => icon(1).dataset.state === 'done');
     const z2 = await unzip(e.w, e.saved.at(-1).blob);
-    ok(e.saved.at(-1).name === 'TIPS_LI46.10-P-070001_v2_no-attachments.zip' && !z2.some(n => n.includes('Attachments')) && z2.filter(n => n.endsWith('.pdf')).length === 1, 'without attachments: current version only, no attachment folder (' + e.saved.at(-1).name + ')');
+    ok(/^LI46\.10-P-070001 - Customer complaint.*_v2_no-attachments\.zip$/.test(e.saved.at(-1).name) && !z2.some(n => n.includes('Attachments')) && z2.filter(n => n.endsWith('.pdf')).length === 1, 'without attachments: current version only, no attachment folder (' + e.saved.at(-1).name + ')');
     // the default: straight to Download saves just the current version
     icon(0).click(); await waitFor(() => P('p_go') && !P('p_go').disabled); P('p_go').click();
     await waitFor(() => e.saved.length === 3);
     const z3 = (await unzip(e.w, e.saved.at(-1).blob)).filter(n => n.endsWith('.pdf'));
-    ok(e.saved.at(-1).name === 'TIPS_LI42.10-P-078779_v5.zip' && z3.length === 1 && z3[0].endsWith('_v5.pdf'), 'default (current version) saves TIPS_<LI>_v5.zip with just that PDF');
+    ok(e.saved.at(-1).name === 'LI42.10-P-078779 - Brake vibration from 60MPH – Diagnostic Guide_v5.zip' && z3.length === 1 && z3[0].endsWith('_v5.pdf'), 'default (current version) saves <LI> - <Title>_v5.zip with just that PDF');
     // everything keeps the plain name
     icon(0).click(); await waitFor(() => P('p_go') && !P('p_go').disabled); P('p_all').click(); P('p_go').click();
     await waitFor(() => e.saved.length === 4);
-    ok(e.saved.at(-1).name === 'TIPS_LI42.10-P-078779.zip' && (await unzip(e.w, e.saved.at(-1).blob)).filter(n => n.endsWith('.pdf')).length === 5, 'All + attachments saves TIPS_<LI>.zip with all 5 PDFs');
+    ok(e.saved.at(-1).name === 'LI42.10-P-078779 - Brake vibration from 60MPH – Diagnostic Guide.zip' && (await unzip(e.w, e.saved.at(-1).blob)).filter(n => n.endsWith('.pdf')).length === 5, 'All + attachments saves <LI> - <Title>.zip with all 5 PDFs');
     ok(!e.w.document.querySelector('.tipsx-row input, .tipsx-sel') && !e.root().querySelector('.selbar'), 'no tick boxes or selection bar');
     // lazy list: new cards get the icon too
     e.w.document.querySelector('.xy-c-card-list-wrapper > div').insertAdjacentHTML('beforeend', `<div><xy-c-card-table-card id="card-105_1_P"><button><xy-c-card-column><p>LI82.60-P-080383</p></xy-c-card-column><xy-c-card-column><p>Radio cover art</p></xy-c-card-column></button></xy-c-card-table-card></div>`);

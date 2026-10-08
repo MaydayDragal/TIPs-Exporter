@@ -40,7 +40,9 @@ function makeEnv(extra = {}) {
   w.chrome = { storage: { local: { get: async k => ({ [k]: st[k] }), set: async o => Object.assign(st, o) } }, runtime: { onMessage: { addListener(fn) { w.__toggle = fn; } } } };
   w.confirm = () => true; w.fetch = fakeFetch;
   let raf = 0; const r0 = w.requestAnimationFrame.bind(w); w.requestAnimationFrame = f => { raf++; return r0(f); };
-  w.eval(probe); w.eval(content);
+  // These legacy endpoint fixtures use zero-filled dummy PDFs; real scrubbing is covered by pdf-scrub.test.js.
+  st.settings = { pdfScrub: { enabled: false }, ...st.settings };
+  w.eval(probe); w.eval(fs.readFileSync(require('path').join(__dirname, '..', 'index-csv.js'), 'utf8')); w.eval(content);
   const btns = () => [...w.document.querySelectorAll('button.tipsx-dl')];
   const fab = () => { const b = w.document.querySelector('#auxMenu0 .tipsx-rbadge'); return b ? b.dataset.kind : ''; };
   const shadow = () => [...w.document.documentElement.children].find(e => e.shadowRoot).shadowRoot;
@@ -78,8 +80,8 @@ const ok = (c, m) => { console.log((c ? 'PASS ' : 'FAIL ') + m); if (!c) process
   await waitFor(() => e.fab() === 'busy');
   ok(true, 'rail ⋮ shows the blue downloading badge while the drawer is closed');
   await waitFor(() => b[0].dataset.state === 'done');
-  ok(e.saved[0] === 'TIPS_LI42.10-P-078779.zip', 'zip saved: ' + e.saved[0]);
-  ok(/^Saved TIPS_LI42\.10-P-078779\.zip \([\d.]+ MB\)/.test(tipText()) && b[0].parentElement.hasAttribute('data-show'), 'tooltip confirms save and stays visible');
+  ok(/^LI42\.10-P-078779 - Repeat workshop visit.*\.zip$/.test(e.saved[0]), 'zip saved: ' + e.saved[0]);
+  ok(/^Saved LI42\.10-P-078779 - Repeat workshop visit.*\.zip \([\d.]+ MB\)/.test(tipText()) && b[0].parentElement.hasAttribute('data-show'), 'tooltip confirms save and stays visible');
   ok(e.fab() === 'done', 'rail ⋮ shows the green saved badge');
   ok(e.st.recent && e.st.recent[0].tips[0] === TOPIC.tips, 'added to Recent downloads');
   fs.writeFileSync(OUT + 'tb_done.html', '<!doctype html><meta charset="utf-8">' + e.w.document.head.innerHTML + '<body style="margin:0;width:1200px">' + e.w.document.getElementById('overlayHubContainer').outerHTML + '</body>');
@@ -129,6 +131,6 @@ const ok = (c, m) => { console.log((c ? 'PASS ' : 'FAIL ') + m); if (!c) process
   { const go = () => { for (const el of e2.w.document.documentElement.children) { const x = el.shadowRoot && el.shadowRoot.querySelector('#p_go'); if (x) return x; } return null; };
     await waitFor(() => go() && !go().disabled); go().click(); }
   await waitFor(() => e2.btns()[0].dataset.state === 'done');
-  ok(e2.saved[0] === 'TIPS_LI42.10-P-078779_v6.zip', 'download works without an index (current version: ' + e2.saved[0] + ')');
+  ok(/^LI42\.10-P-078779 - Repeat workshop visit.*_v6\.zip$/.test(e2.saved[0]), 'download works without an index (current version: ' + e2.saved[0] + ')');
   process.exit();
 })().catch(err => { console.error('ERROR', err); process.exit(1); });

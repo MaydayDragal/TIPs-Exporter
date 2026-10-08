@@ -46,7 +46,9 @@ function makeEnv(settings, extra = {}) {
   w.chrome = { storage: { local: { get: async k => ({ [k]: st[k] }), set: async o => Object.assign(st, o) } }, runtime: { onMessage: { addListener(fn) { w.__toggle = fn; } } } };
   w.confirm = () => true;
   w.fetch = fakeFetch;
-  w.eval(probe); w.eval(content);
+  // These legacy endpoint fixtures use zero-filled dummy PDFs; real scrubbing is covered by pdf-scrub.test.js.
+  st.settings = { pdfScrub: { enabled: false }, ...st.settings };
+  w.eval(probe); w.eval(fs.readFileSync(require('path').join(__dirname, '..', 'index-csv.js'), 'utf8')); w.eval(content);
   const env = { w, st, saved, root: () => [...w.document.documentElement.children].find(e => e.shadowRoot).shadowRoot };
   env.$ = id => env.root().getElementById(id);
   env.text = () => { const r = (env.root().querySelector('.dr') || env.w.document.createElement('div')), tw = w.document.createTreeWalker(r, 4), a = []; while (tw.nextNode()) if (tw.currentNode.parentElement.tagName !== 'STYLE') a.push(tw.currentNode.textContent); return a.join(' ').replace(/\s+/g, ' '); };
@@ -114,7 +116,7 @@ const index = topics.map(t => ({ tips: t.tips, tipsId: t.tipsId, version: t.vers
   // Redo from recent: single doc
   e.type('078779'); e.$('look').click(); await waitFor(() => e.$('dlfound'));
   e.$('dlfound').click(); await waitFor(() => /Saved to Downloads/.test(e.text()));
-  ok(e.saved[1] === 'TIPS_LI42.10-P-078779.zip', 'single doc saved as TIPS_<LI>.zip');
+  ok(e.saved[1] === 'LI42.10-P-078779 - Door module topic 9.zip', 'single doc saved as <LI> - <Title>.zip');
   ok(/LI42\.10-P-078779 v5 · [\d.]+ MB · today/.test(e.text()), 'single recent entry shows version');
   e.$('newdl').click(); await tick(20);
   e.root().querySelector('[data-redo="1"]').click();

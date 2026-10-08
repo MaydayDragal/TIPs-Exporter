@@ -33,7 +33,9 @@ function makeEnv({ settings, extra = {}, path = '/tips-reader/search/topics', bo
   w.confirm = () => true; w.fetch = fakeFetch;
   const pm = w.postMessage.bind(w);
   w.postMessage = (d, o) => { if (d && d.__tipsx) setTimeout(() => w.dispatchEvent(new w.MessageEvent('message', { data: d, source: w })), 0); else pm(d, o); };
-  w.eval(probe); w.eval(content);
+  // These legacy endpoint fixtures use zero-filled dummy PDFs; real scrubbing is covered by pdf-scrub.test.js.
+  st.settings = { pdfScrub: { enabled: false }, ...st.settings };
+  w.eval(probe); w.eval(fs.readFileSync(require('path').join(__dirname, '..', 'index-csv.js'), 'utf8')); w.eval(content);
   const env = { w, st, saved, writes, root: () => [...w.document.documentElement.children].find(e => e.shadowRoot).shadowRoot };
   env.$ = id => env.root().getElementById(id);
   env.text = () => { const r = (env.root().querySelector('.dr') || env.w.document.createElement('div')), tw = w.document.createTreeWalker(r, 4), a = []; while (tw.nextNode()) if (tw.currentNode.parentElement.tagName !== 'STYLE') a.push(tw.currentNode.textContent); return a.join(' ').replace(/\s+/g, ' '); };
@@ -77,7 +79,7 @@ const IDX = T.map(x => ({ tips: x.tips, tipsId: x.tipsId, version: x.version, ti
     const go = () => { for (const el of e.w.document.documentElement.children) { const x = el.shadowRoot && el.shadowRoot.querySelector('#p_go'); if (x) return x; } return null; };
     await waitFor(() => go() && !go().disabled); go().click();
     await waitFor(() => b.dataset.state === 'done');
-    ok(/^TIPS_LI42\.10-P-078779_v\d+\.zip$/.test(e.saved[0]), 'F7: toolbar download saved the open topic (current version, the picker default): ' + e.saved[0]);
+    ok(/^LI42\.10-P-078779 - .+_v\d+\.zip$/.test(e.saved[0]), 'F7: toolbar download saved the open topic (current version, the picker default): ' + e.saved[0]);
     ok(e.$('dlfound') && /Download 2/.test(e.text()) && e.$('li').value === 'LI54.10-P-080684 LI20.10-P-075374', 'F7: panel still shows the user\'s looked-up list afterwards');
     // second click while a panel download runs → specific message, not a stale one
     e.$('dlfound').click(); await waitFor(() => e.$('cancel'));

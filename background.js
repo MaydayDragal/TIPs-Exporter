@@ -1,3 +1,5 @@
+importScripts('index-csv.js', 'index-folder.js', 'folder-db.js', 'index-background.js');
+
 // Toolbar icon: open/close the exporter drawer on the TIPS Reader tab.
 const READER = 'https://xentry.mercedes-benz.com/tips-reader/';
 

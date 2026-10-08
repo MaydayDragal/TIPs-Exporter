@@ -36,8 +36,10 @@ function makeEnv(settings, extra = {}) {
   w.fetch = fakeFetch;
   const pm = w.postMessage.bind(w);
   w.postMessage = (d, o) => { if (d && d.__tipsx) setTimeout(() => w.dispatchEvent(new w.MessageEvent('message', { data: d, source: w })), 0); else pm(d, o); };
+  // These legacy endpoint fixtures use zero-filled dummy PDFs; real scrubbing is covered by pdf-scrub.test.js.
+  st.settings = { pdfScrub: { enabled: false }, ...st.settings };
   w.eval(probe);
-  w.eval(content);
+  w.eval(fs.readFileSync(require('path').join(__dirname, '..', 'index-csv.js'), 'utf8')); w.eval(content);
   const env = { w, st, root: () => [...w.document.documentElement.children].find(e => e.shadowRoot).shadowRoot };
   env.open = async () => {
     await tick(100);
@@ -84,11 +86,11 @@ const S0 = { outlet: 'o1', user: 'u1', ver: '1.22.0' };
   ok(Math.min(...gaps) >= 290, `≥300 ms between pages (min ${Math.min(...gaps)} ms)`);
   console.log('     msg:', env.root().querySelector('.note').textContent);
 
-  // 4. short result set warns
-  failAfterHits = 1000;
-  env.root().getElementById('refresh').click();
-  await waitFor(() => /appended/.test(env.root().textContent));
-  ok(/only 2000 topics could be read/.test(env.root().textContent) && log.some(e => e.kind === 'search' && e.order === 'desc'), 'capped search: fills in from the newest end, then warns about what is still missing');
+  // 4. short result set warns (full read: Rebuild index; Check new only reads the newest topics, see check-new.test.js)
+  failAfterHits = 1000; env.w.__confirmAnswer = true;
+  env.root().getElementById('build').click();
+  await waitFor(() => /only 2000 topics could be read/.test(env.root().textContent));
+  ok(log.some(e => e.kind === 'search' && e.order === 'desc'), 'capped search: fills in from the newest end, then warns about what is still missing');
   console.log('     msg:', env.root().querySelector('.note').textContent);
   failAfterHits = Infinity;
 

@@ -24,6 +24,7 @@
   };
 
   // ---------------------------------------------------------------- state
+  const OUTPUT_LAYOUT = 1; // example-style folders; persisted ZIPs from older layouts must be rebuilt
   const S = {
     index: [],          // frozen list [{tips,tipsId,version,title,mdate}]
     done: {},           // tipsId -> {b: batch, d: iso date, v: version}
@@ -33,22 +34,39 @@
     resume: null,       // a download interrupted by a lost session: {title, kind, remaining, carry, finish}
     latest: {},         // newest versions seen by "Check for updates": tips -> version
     settings: { outlet: '', user: '', ver: '', batchSize: 25, delayMs: 2000, delayMaxMs: 5000, pageSize: 50, pageSizeSrc: 'default',
-      autoApprove: false, autoContinue: true,
-      files: { docJson: true, attCsv: true, histCsv: true, histJson: true, manifest: true } },
+      autoApprove: false, autoContinue: true, autoCheck: true, outputLayout: OUTPUT_LAYOUT,
+      pdfScrub: { enabled: true, user: true, timestamp: true, strings: 'D7MASALL' },
+      files: { docJson: false, attCsv: false, histCsv: false, histJson: false, manifest: false } },
     run: null,          // {n, i, total, label, paused, cancel}
     pending: null,      // prepared batch awaiting approval {n, blob, fname, summary, results}
+    approving: false,  // hold the index stable through the complete approval commit
+    importing: false,  // includes reading the selected CSV before its index is committed
+    checking: false,    // "Check new" running
+    lastCheck: null,    // result of the last "Check new": {at, fresh, updated, scanned, since, full, ids: [tipsId…], tips: [LI…]}
+    retry: {},          // tipsId -> batches in which the document was incomplete (temporary file failures)
+    folder: { configured: false, epoch: null, phase: 'disconnected' }, folderLock: null, folderSyncing: false, progressBase: '',
     msg: ''
   };
   const DEFAULT_SEARCH = { fuzzyActive: true, correlationId: 4, fallbackLang: 'en', area: 'WS', creator: null, sortorder: { field: 'mdate', order: 'desc' }, lang: { lang: 'en' }, countries: ['US'], vehicleContext: {}, timefilter: {}, docName: '', workstate: '', brandNames: ['Maybach', 'Mercedes-Benz'], productGroupNames: ['PKW', 'Supersportwagen'], pagination: { pageNumber: 1, pageSize: 50 }, drilldowns: [{ key: 'country', identifier: 'US' }], favFilterActive: false, searchField: 'all', provideNavigation: 'full', totalHitsCountOnly: false, useAi: false };
 
   let loaded = false;   // settings read from storage; nothing may be saved before this
   async function load() {
+    S.folder = await store.get('indexFolder', S.folder);
+    await folderRequest('load');
     S.index = await store.get('index', []);
     S.done = await store.get('done', {});
+    S.progressBase = window.TIPSIndexCsv.stringify(S.index, S.done);
     S.history = await store.get('history', []);
     S.recent = await store.get('recent', []);
+    S.lastCheck = await store.get('lastCheck', null);
+    S.retry = await store.get('retry', {});
     const saved = await store.get('settings', {});
-    S.settings = { ...S.settings, ...saved, files: { ...S.settings.files, ...(saved.files || {}) } };
+    // Adopt the example's PDFs/attachments-only default once. Preserve custom file selections and
+    // any explicit selection made after upgrading, including choosing All again.
+    const oldFileDefaults = saved.outputLayout === undefined && (!saved.files || Object.keys(S.settings.files).every(k => saved.files[k] !== false));
+    S.settings = { ...S.settings, ...saved, outputLayout: OUTPUT_LAYOUT,
+      files: { ...S.settings.files, ...(oldFileDefaults ? {} : saved.files || {}) },
+      pdfScrub: { ...S.settings.pdfScrub, ...(saved.pdfScrub || {}) } };
     if (saved.delayMaxMs === undefined) {   // pre-1.3 settings had one fixed delay (default 250 ms)
       S.settings.delayMs = Math.max(+saved.delayMs || 0, 2000); S.settings.delayMaxMs = S.settings.delayMs + 3000;
     }
@@ -58,8 +76,65 @@
     loaded = true;
     if (hasChrome && (await store.get('openOnLoad', 0)) > Date.now() - 60000) { await store.set('openOnLoad', 0); setTimeout(() => openDrawer(true), 300); }   // toolbar icon reloaded this tab
   }
-  const saveIndex = () => store.set('index', S.index);
-  const saveDone = () => store.set('done', S.done);
+  // Large state (the prepared zip, the files of an interrupted download) goes to IndexedDB, not chrome.storage.
+  const idb = (() => {
+    let dbp = null, warned = 0;
+    const open = () => dbp || (dbp = new Promise((res, rej) => {
+      const ix = (typeof indexedDB !== 'undefined' && indexedDB) || (window.indexedDB);
+      if (!ix) return rej(new Error('no IndexedDB'));
+      const q = ix.open('tips-exporter', 1);
+      q.onupgradeneeded = () => q.result.createObjectStore('kv');
+      q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error);
+    }));
+    const tx = (mode, fn) => open().then(db => new Promise((res, rej) => { const t = db.transaction('kv', mode), st = t.objectStore('kv'), q = fn(st); t.oncomplete = () => res(q && q.result); t.onerror = t.onabort = () => rej(t.error); }));
+    return {
+      get: k => tx('readonly', st => st.get(k)).catch(() => undefined),
+      put: (k, v) => tx('readwrite', st => st.put(v, k)).catch(e => { if (!warned++) console.warn('TIPS Exporter: could not keep', k, e && e.message); }),
+      del: k => tx('readwrite', st => st.delete(k)).catch(() => { })
+    };
+  })();
+  let persisting = 0;
+  async function keep(k, v) { persisting++; try { await (v == null ? idb.del(k) : idb.put(k, v)); } finally { persisting--; } }
+  async function keepPending() {
+    const p = S.pending; if (!p) return keep('pending', null);
+    const buf = p.blob.arrayBuffer ? await p.blob.arrayBuffer() : await new Promise((res, rej) => { const fr = new FileReader(); fr.onload = () => res(fr.result); fr.onerror = () => rej(fr.error); fr.readAsArrayBuffer(p.blob); });
+    if (S.pending !== p) return;   // approved/discarded meanwhile
+    await keep('pending', { kind: p.kind, n: p.n, fname: p.fname, results: p.results, summary: p.summary, pdfPolicy: p.pdfPolicy, layout: OUTPUT_LAYOUT, indexEpoch: S.folder.epoch || null, buf });
+  }
+  async function keepResume() {
+    const r = S.resume; if (!r) return keep('resume', null);
+    await keep('resume', { title: r.title, kind: r.kind, n: r.n, sg: r.sg, remaining: r.remaining, carry: r.carry });
+  }
+  async function restoreKept() {
+    const p = await idb.get('pending'), r = await idb.get('resume');
+    // An older ZIP/carry may contain unprocessed PDFs. It must be rebuilt under the active rules.
+    if ((p && !compatiblePdfPolicy(p.pdfPolicy)) || (r && !compatiblePdfPolicy(r.carry && r.carry.pdfPolicy))) {
+      await keep('pending', null); await keep('resume', null);
+      setMsg('The saved download predates the current PDF scrub rules. Prepare it again so every PDF is processed. Export progress is unchanged.');
+      return;
+    }
+    if ((p && p.layout !== OUTPUT_LAYOUT) || (r && (!r.carry || r.carry.layout !== OUTPUT_LAYOUT))) {
+      await keep('pending', null); await keep('resume', null);
+      setMsg('The saved download uses an older folder layout. Prepare it again to use the new layout. Export progress is unchanged.');
+      return;
+    }
+    if ((p && (p.indexEpoch || null) !== (S.folder.epoch || null)) || (r && (r.carry?.indexEpoch || null) !== (S.folder.epoch || null))) {
+      await keep('pending', null); await keep('resume', null);
+      setMsg('The index folder changed. Prepare the saved download again using this index.');
+      return;
+    }
+    if (p && p.buf && !S.pending) {
+      S.pending = { kind: p.kind, n: p.n, fname: p.fname, results: p.results, summary: p.summary, pdfPolicy: p.pdfPolicy, blob: new Blob([p.buf], { type: 'application/zip' }) };
+      view = 'bulk';
+    }
+    if (r && r.carry && !S.resume && !S.pending) {
+      S.resume = { ...r, exporter: exportDoc, finish: r.kind === 'bulk' ? o => finishBatch(r.n, o) : o => finishSingle(r.sg, o) };
+      view = r.kind === 'bulk' ? 'bulk' : 'single';
+    }
+    if (S.pending || S.resume) setMsg(S.pending ? `${S.pending.fname} from before the page was reloaded is still waiting for approval.` : `The interrupted download from before the page was reloaded can be resumed.`);
+  }
+  const saveIndex = () => persistProgress();
+  const saveDone = () => persistProgress();
   const saveHistory = () => store.set('history', S.history);
   const saveRecent = () => store.set('recent', S.recent);
   const saveSettings = () => store.set('settings', S.settings);
@@ -115,21 +190,45 @@
   const clip = (s, n) => { s = String(s || '').replace(/[\\/:*?"<>|\x00-\x1F]/g, '_').replace(/\s+/g, ' ').trim().replace(/[. ]+$/, ''); if (s.length <= n) return s; const m = s.match(/^(.*?)(\.[A-Za-z0-9]{1,5})$/);
     return (m && m[2].length < n ? m[1].slice(0, n - m[2].length).replace(/[. ]+$/, '') + m[2] : s.slice(0, n).replace(/[. ]+$/, '')); };
   const safe = s => String(s || '').replace(/[\\/:*?"<>|\x00-\x1F]/g, '_').replace(/\s+/g, ' ').trim().slice(0, 90).replace(/[. ]+$/, '');
-  const csvEsc = v => '"' + String(v ?? '').replace(/"/g, '""') + '"';
+  const topicName = item => clip(item.title, 45) ? `${safe(item.tips)} - ${clip(item.title, 45)}` : safe(item.tips);
+  const csvEsc = window.TIPSIndexCsv.escape;
   const loc = o => o ? (o.en || Object.values(o)[0] || '') : '';
   const pad3 = n => String(n).padStart(3, '0');
   // Batches = the next `batchSize` pending documents in index order. Progress is tracked per document,
   // so the batch size can be changed at any time without losing or repeating anything.
   const pendingItems = () => S.index.filter(x => !S.done[x.tipsId]);
   const doneCount = () => S.index.reduce((a, x) => a + (S.done[x.tipsId] ? 1 : 0), 0);
-  const lastBatchNo = () => Math.max(0, ...Object.values(S.done).map(d => +d.b || 0), ...S.history.map(h => +h.n || 0));
+  const lastBatchNo = () => { let m = 0; for (const d of Object.values(S.done)) if (+d.b > m) m = +d.b; for (const h of S.history) if (+h.n > m) m = +h.n; return m; };
   function nextBatch() { return pendingItems().length ? lastBatchNo() + 1 : null; }
   const remainingBatches = () => Math.ceil(pendingItems().length / S.settings.batchSize);
   class SessionError extends Error { }
+  class TransientError extends Error { }   // server/network trouble that survived the retries – worth trying again later
 
+  const fileNameOrder = new Intl.Collator('en', { numeric: true, sensitivity: 'base' });
+  function compareZipPaths(a, b) {
+    const aa = a.name.split('/'), bb = b.name.split('/');
+    for (let i = 0; i < Math.min(aa.length, bb.length); i++) {
+      const aDir = i < aa.length - 1, bDir = i < bb.length - 1;
+      if (aDir !== bDir) return aDir ? -1 : 1;
+      const order = fileNameOrder.compare(aa[i], bb[i]);
+      if (order) return order;
+    }
+    return a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
+  }
   function makeZip(files) {
+    // Write folders first and versions in numeric order, regardless of download order. Explicit
+    // directory entries also make the layout visible to ZIP viewers before extraction.
+    const entries = [], dirs = new Set();
+    for (const f of [...files].sort(compareZipPaths)) {
+      const parts = f.name.split('/');
+      for (let i = 1; i < parts.length; i++) {
+        const dir = parts.slice(0, i).join('/') + '/';
+        if (!dirs.has(dir)) { dirs.add(dir); entries.push({ name: dir, data: new Uint8Array(0), directory: true }); }
+      }
+      entries.push(f);
+    }
     const parts = [], central = []; let off = 0;
-    for (const f of files) {
+    for (const f of entries) {
       const nm = enc.encode(f.name), d = f.data, crc = crc32(d);
       const lh = new DataView(new ArrayBuffer(30));
       lh.setUint32(0, 0x04034b50, true); lh.setUint16(4, 20, true); lh.setUint16(6, 0x0800, true);
@@ -140,27 +239,57 @@
       ch.setUint32(0, 0x02014b50, true); ch.setUint16(4, 20, true); ch.setUint16(6, 20, true); ch.setUint16(8, 0x0800, true);
       ch.setUint16(14, 0x21, true); ch.setUint32(16, crc, true); ch.setUint32(20, d.length, true); ch.setUint32(24, d.length, true);
       ch.setUint16(28, nm.length, true); ch.setUint32(42, off, true);
+      if (f.directory) ch.setUint32(38, 0x10, true); // DOS directory attribute
       central.push(new Uint8Array(ch.buffer), nm);
       off += 30 + nm.length + d.length;
     }
     const csize = central.reduce((a, b) => a + b.length, 0);
     const e = new DataView(new ArrayBuffer(22));
-    e.setUint32(0, 0x06054b50, true); e.setUint16(8, files.length, true); e.setUint16(10, files.length, true); e.setUint32(12, csize, true); e.setUint32(16, off, true);
+    e.setUint32(0, 0x06054b50, true); e.setUint16(8, entries.length, true); e.setUint16(10, entries.length, true); e.setUint32(12, csize, true); e.setUint32(16, off, true);
     return new Blob([...parts, ...central, new Uint8Array(e.buffer)], { type: 'application/zip' });
   }
 
+  // A lost XENTRY session shows up in several ways: 401/403; a redirect to a login/SSO page (same origin: r.redirected;
+  // another origin: fetch fails with a TypeError because the login page has no CORS headers); or the login page
+  // returned with HTTP 200 where JSON or a PDF was expected. All of them become a SessionError (→ Resume).
+  const ctype = r => { try { return (r.headers && r.headers.get && r.headers.get('content-type')) || ''; } catch (e) { return ''; } };
+  function sessionCheck(r, expect) {
+    if (r.status === 401 || r.status === 403) throw new SessionError('Session expired or not authorised (HTTP ' + r.status + ')');
+    let other = false; try { other = !!(r.redirected && r.url && new URL(r.url).origin !== location.origin); } catch (e) { }
+    if (r.redirected && (other || /login|logon|auth|sso|saml/i.test(r.url))) throw new SessionError('Session expired – TIPS redirected to the login page');
+    if (r.ok && expect && expect !== 'text/html' && /text\/html/i.test(ctype(r))) throw new SessionError('Session expired – TIPS returned its login page');
+    return r;
+  }
+  // After a network-level failure: is it the session (login redirect) or really the network?
+  async function probeSession() {
+    try {
+      const r = await fetch('/tips/common-service/api/v1/xentry/currentuser', { credentials: 'include', redirect: 'manual', headers: { Accept: 'application/json' } });
+      if (r.type === 'opaqueredirect' || (r.status >= 300 && r.status < 400) || r.status === 401 || r.status === 403 || (r.ok && /text\/html/i.test(ctype(r)))) return true;
+    } catch (e) { }
+    return false;
+  }
   async function get(url, accept, tries = 3) {
     let last;
     for (let i = 0; i < tries; i++) {
       try {
-        const r = await fetch(url, { credentials: 'include', headers: { ...H(), Accept: accept } });
-        if (r.status === 401 || r.status === 403 || r.redirected && /login|auth/i.test(r.url)) throw new SessionError('Session expired or not authorised (HTTP ' + r.status + ')');
+        const r = sessionCheck(await fetch(url, { credentials: 'include', headers: { ...H(), Accept: accept } }), accept);
         if (r.ok || r.status < 500) return r;
         last = 'HTTP ' + r.status;
-      } catch (e) { if (e instanceof SessionError) throw e; last = e.message; }
+      } catch (e) {
+        if (e instanceof SessionError) throw e;
+        if ((e && e.name === 'TypeError') && await probeSession()) throw new SessionError('Session expired – TIPS redirected to the login page');
+        last = e.message;
+      }
       await sleep(1500 * (i + 1));
     }
-    throw new Error(last || 'request failed');
+    throw new TransientError(last || 'request failed');
+  }
+  // Topic search (POST). Same session handling; one attempt (callers decide what a failed page means).
+  async function searchPost(body) {
+    let r;
+    try { r = await fetch('/tips/topic-service/api/v1/topics/search?' + Q(), { method: 'POST', credentials: 'include', headers: H(), body: JSON.stringify(body) }); }
+    catch (e) { if ((e && e.name === 'TypeError') && await probeSession()) throw new SessionError('Session expired – TIPS redirected to the login page'); throw e; }
+    return sessionCheck(r, 'application/json');
   }
   function saveBlob(blob, fname) {
     const a = document.createElement('a');
@@ -176,8 +305,7 @@
     const size = S.settings.pageSize; let total = 0, hits = 0, changed = 0, done = false;
     for (let p = 1; p <= 2000; p++) {
       setMsg(`${label}… page ${p}${total ? ' of ' + Math.ceil(total / size) : ''}`);
-      const r = await fetch('/tips/topic-service/api/v1/topics/search?' + Q(), { method: 'POST', credentials: 'include', headers: H(), body: JSON.stringify({ ...DEFAULT_SEARCH, sortorder: { field: 'mdate', order }, pagination: { pageNumber: p, pageSize: size } }) });
-      if (r.status === 401 || r.status === 403) throw new SessionError('Session expired (HTTP ' + r.status + ')');
+      const r = await searchPost({ ...DEFAULT_SEARCH, sortorder: { field: 'mdate', order }, pagination: { pageNumber: p, pageSize: size } });
       if (!r.ok) { if (p === 1) throw new Error('Search failed: HTTP ' + r.status); break; }   // past a paging limit: keep what we have
       const j = await r.json(); total = j.totalHits;
       if (!j.hits || !j.hits.length) break;
@@ -210,62 +338,217 @@
     return s.pageSizeSrc !== 'default' || confirm(`The Reader's own search page size hasn't been seen in this tab yet, so the exporter would page through results ${s.pageSize} at a time.\n\nTo match the Reader instead, click Cancel, run any search in TIPS, then try again.\n\nContinue with ${s.pageSize} per page?`);
   }
   async function buildIndex() {
+    if (S.checking || busy()) return;
     if (S.index.length && !confirm('An index already exists. Rebuilding re-sorts everything and can shift batch numbers. Use "Check new" instead unless you are starting over.\n\nRebuild anyway?')) return;
     if (!pageSizeOK()) return;
-    setMsg('Building index…');
-    const { list, total, short } = await fetchAllTopics();
-    S.index = list.sort((a, b) => a.tips.localeCompare(b.tips));
-    await saveIndex();
+    S.checking = true;   // same lock as Check new: no second build, check, import or batch meanwhile
+    let list, total, short;
+    try {
+      setMsg('Building index…');
+      ({ list, total, short } = await fetchAllTopics());
+      S.index = list.sort((a, b) => a.tips.localeCompare(b.tips));
+      await saveIndex();
+    } finally { S.checking = false; }
     setMsg(`Index built: ${S.index.length} unique topics (${total} search hits), ${remainingBatches()} batches to go at ${S.settings.batchSize} per batch.` + short);
   }
-  async function refreshIndex() {
-    if (!pageSizeOK()) return;
-    setMsg('Checking for new or updated topics…');
-    const { list, short } = await fetchAllTopics();
-    const byId = new Map(S.index.map(x => [x.tipsId, x]));
-    let updated = 0, reexport = 0; const fresh = [];
-    for (const x of list) {
-      const cur = byId.get(x.tipsId);
-      if (!cur) { fresh.push(x); continue; }
-      if (x.version !== cur.version) {
-        cur.version = x.version; cur.title = x.title; cur.mdate = x.mdate; updated++;
-        if (S.done[cur.tipsId]) { delete S.done[cur.tipsId]; reexport++; }
-      }
+  // "Check new": TIPS search sorted by modification date, newest first, read only until the hits are older than
+  // the newest topic already in the index (minus an overlap). New topics and new versions always carry a recent
+  // modification date, so they are at the top; the rest of the catalogue is never paged through.
+  // Shift+click on Check new (in the drawer) still compares the whole catalogue.
+  const CHECK_OVERLAP_MS = 14 * 864e5;   // re-read two weeks before the newest indexed date (late-published topics)
+  const tsOf = v => {
+    if (v == null || v === '') return NaN;
+    if (typeof v === 'number') return v > 0 ? v : NaN;
+    const s = String(v).trim();
+    if (/^\d+$/.test(s)) return +s > 0 ? +s : NaN;
+    return Date.parse(s);
+  };
+  // Newest modification date in the index. Dates TIPS can't have sent (unparseable, before 1990 or in the future –
+  // e.g. from an edited or foreign progress log) are skipped and reported, so one bad row can't hide every new topic.
+  function newestIndexed() {
+    const lo = Date.UTC(1990, 0, 1), hi = Date.now() + 2 * 864e5, bad = [];
+    let max = NaN;
+    for (const x of S.index) {
+      const t = tsOf(x.mdate);
+      if (!(t >= lo && t <= hi)) { if (x.mdate && x.mdate !== '0' && !isNaN(t)) bad.push(x); continue; }
+      if (!(t <= max)) max = t;
     }
-    fresh.sort((a, b) => a.tips.localeCompare(b.tips));
-    S.index = S.index.concat(fresh);
-    await saveIndex(); await saveDone();
-    setMsg(`${fresh.length} new topic(s) appended at the end; ${updated} topic(s) have a newer version` + (reexport ? ` (${reexport} already-exported one(s) re-queued)` : '') + '.' + short);
+    return { max, bad };
   }
+  async function fetchLatest(since, byId, quiet = false) {
+    const size = S.settings.pageSize, out = new Map(), cutoff = since - CHECK_OVERLAP_MS;
+    let total = 0, scanned = 0, short = '';
+    for (let p = 1; p <= 2000; p++) {
+      if (!quiet) setMsg(`Checking the newest topics… page ${p}`);
+      const r = await searchPost({ ...DEFAULT_SEARCH, sortorder: { field: 'mdate', order: 'desc' }, pagination: { pageNumber: p, pageSize: size } });
+      if (!r.ok) { if (p === 1) throw new Error('Search failed: HTTP ' + r.status); short = ` ⚠ TIPS stopped returning pages after page ${p - 1} – run Check new again later.`; break; }
+      const j = await r.json(); total = j.totalHits;
+      if (!j.hits || !j.hits.length) break;
+      let older = false, changed = 0;
+      for (const h of j.hits) {
+        const x = { tips: h.tips, tipsId: h.tipsId, version: h.version, title: h.title, mdate: h.modificationDate };
+        if (tsOf(x.mdate) < cutoff) { older = true; continue; }   // NaN never counts as older
+        scanned++;
+        if (!out.has(x.tipsId)) out.set(x.tipsId, x);
+        const cur = byId.get(String(x.tipsId));
+        if (!cur || +cur.version !== +x.version) changed++;
+      }
+      if (older) break;                           // reached topics that were already indexed
+      if (isNaN(since) && !changed) break;        // index without dates: stop at the first page with nothing new
+      if (p * size >= total) break;
+      await sleep(300);
+    }
+    return { list: [...out.values()], scanned, short };
+  }
+  // auto: the check that runs when TIPS loads – no prompts, no progress messages, and the drawer message is only
+  // replaced when something was found.
+  async function refreshIndex(full = false, auto = false) {
+    if (S.checking || busy() || (S.single && S.single.phase === 'looking')) return null;
+    if (auto) { if (!S.index.length || !sessionOK()) return null; }
+    else {
+      if (!S.index.length) { setMsg('Build the index (or import a log) before checking for new topics.'); return null; }
+      if (!sessionOK()) { setMsg('Session values missing – open Settings and fill Outlet / User, or open any topic once so they can be detected.'); return null; }
+      if (!pageSizeOK()) return null;
+    }
+    S.checking = true; render();
+    try {
+      const byId = new Map(S.index.map(x => [String(x.tipsId), x]));
+      const ni = full ? { max: NaN, bad: [] } : newestIndexed(), since = ni.max;
+      if (!auto) setMsg(full ? 'Checking every topic for new or updated ones…' : 'Checking the newest topics…');
+      const { list, short, scanned } = full ? { ...(await fetchAllTopics()), scanned: 0 } : await fetchLatest(since, byId, auto);
+      let updated = 0, reexport = 0; const fresh = [], upd = [], updInfo = [];
+      for (const x of list) {
+        const cur = byId.get(String(x.tipsId));
+        if (!cur) { fresh.push(x); continue; }
+        if (+x.version !== +cur.version) {
+          updInfo.push({ tips: x.tips, tipsId: x.tipsId, title: x.title, version: x.version, prev: cur.version, mdate: x.mdate, kind: 'update', exported: !!S.done[cur.tipsId] });
+          cur.version = x.version; cur.title = x.title; cur.mdate = x.mdate; updated++; upd.push(cur);
+          if (S.done[cur.tipsId]) { delete S.done[cur.tipsId]; reexport++; }
+        }
+      }
+      fresh.sort((a, b) => a.tips.localeCompare(b.tips));
+      S.index = S.index.concat(fresh);
+      await saveIndex();
+      const all = [...fresh, ...upd];
+      S.lastCheck = { at: new Date().toISOString(), fresh: fresh.length, updated, scanned: full ? list.length : scanned, full,
+        since: isNaN(since) ? null : new Date(since - CHECK_OVERLAP_MS).toISOString(), ids: all.map(x => x.tipsId), tips: all.map(x => x.tips), auto,
+        items: [...fresh.map(x => ({ tips: x.tips, tipsId: x.tipsId, title: x.title, version: x.version, mdate: x.mdate, kind: 'new' })), ...updInfo] };
+      await store.set('lastCheck', S.lastCheck);
+      const names = l => l.length ? ` (${l.slice(0, 5).map(x => x.tips).join(', ')}${l.length > 5 ? ` +${l.length - 5} more` : ''})` : '';
+      const back = isNaN(since) ? '' : new Date(since - CHECK_OVERLAP_MS).toISOString().slice(0, 10);
+      const scope = full ? `Checked all ${fmtN(list.length)} topics` : !scanned && back ? `No topics have changed in TIPS since ${back}` : `Checked the ${fmtN(scanned)} most recently changed topic${scanned === 1 ? '' : 's'}${back ? ` (back to ${back})` : ''}`;
+      const badNote = ni.bad.length ? ` Ignored ${ni.bad.length} impossible modification date(s) in the index, e.g. ${ni.bad[0].tips}: "${ni.bad[0].mdate}" – Rebuild index (or Shift+click Check new) to replace them.` : '';
+      if (auto && !all.length && !short) return S.lastCheck;   // nothing new on load: leave the drawer as it was
+      setMsg((auto ? 'When TIPS loaded: ' : '') + `${scope}: ` + (all.length
+        ? `${fresh.length} new topic(s) appended at the end${names(fresh)}; ${updated} topic(s) have a newer version${names(upd)}` + (reexport ? ` – ${reexport} already-exported one(s) re-queued` : '') + '.'
+        : 'no new or updated topics.') + short + (auto ? '' : badNote));
+      return S.lastCheck;
+    } finally { S.checking = false; render(); }
+  }
+  // Topics found by the last check that still wait to be exported (badge on the page button).
+  const checkPending = () => { const lc = S.lastCheck; if (!lc || !lc.ids) return 0; const ids = new Set(lc.ids.map(String)); return S.index.filter(x => ids.has(String(x.tipsId)) && !S.done[x.tipsId]).length; };
 
   // ---------------------------------------------------------------- log import/export
-  function parseCsv(text) {
-    return text.trim().split(/\r?\n/).slice(1).map(l => (l.match(/"((?:[^"]|"")*)"/g) || []).map(c => c.slice(1, -1).replace(/""/g, '"')));
-  }
   async function importLog(text) {
-    const rows = parseCsv(text);
-    if (!rows.length || rows[0].length < 8) throw new Error('This does not look like _progress_log_all_documents.csv');
-    const idx = [], done = {};
-    for (const [i, b, tips, tipsId, version, title, mdate, status, date] of rows) {
-      const it = { tips, tipsId: +tipsId, version: +version, title, mdate };
-      idx.push(it);
-      if (status === 'exported') done[it.tipsId] = { b: +b, d: date, v: +version };
-    }
-    S.index = idx; S.done = done;
-    await saveIndex(); await saveDone();
-    setMsg(`Imported log: ${idx.length} topics, ${Object.keys(done).length} already exported. Next batch: ${nextBatch() ?? '— (all done)'}.`);
+    const { index, done } = window.TIPSIndexCsv.parse(text);
+    S.index = index; S.done = done;
+    await saveIndex();
+    setMsg(`Imported log: ${index.length} topics, ${Object.keys(done).length} already exported. Next batch: ${nextBatch() ?? '— (all done)'}.`);
   }
-  function progressCsv(doneMap = S.done) {
-    const log = ['index,batch,tips,tipsId,version_indexed,title,modification_date,status,exported_on'];
-    S.index.forEach((x, i) => { const s = doneMap[x.tipsId]; log.push([i + 1, s ? s.b : '', x.tips, x.tipsId, x.version, x.title, x.mdate, s ? 'exported' : 'pending', s ? s.d : ''].map(csvEsc).join(',')); });
-    return log.join('\r\n');
+  function progressCsv(doneMap = S.done) { return window.TIPSIndexCsv.stringify(S.index, doneMap); }
+
+  // ---------------------------------------------------------------- shared index folder
+  const folderProblem = () => S.folder.configured && S.folder.phase !== 'saved';
+  async function folderRequest(action, extra = {}) {
+    if (!hasChrome || !chrome.runtime?.sendMessage) return null;
+    try {
+      const r = await chrome.runtime.sendMessage({ type: 'index-folder', action, ...extra });
+      if (!r) throw Error('The index service did not respond. Reload the extension and TIPS tab.');
+      if (r.status) S.folder = r.status;
+      else if (!r.ok) S.folder = { ...S.folder, phase: 'error', message: r.error };
+      return r;
+    } catch (e) {
+      S.folder = { ...S.folder, phase: 'error', message: 'Index folder unavailable: ' + e.message };
+      return { ok: false, transport: true, error: S.folder.message };
+    }
+  }
+  async function reloadProgress() {
+    if (!loaded) return;
+    const keys = ['index', 'done', 'history', 'retry', 'lastCheck', 'latest', 'indexFolder'];
+    const values = await Promise.all(keys.map(k => store.get(k, k === 'index' || k === 'history' ? [] : k === 'lastCheck' ? null : {})));
+    keys.forEach((k, i) => { S[k === 'indexFolder' ? 'folder' : k] = values[i]; });
+    S.progressBase = progressCsv();
+  }
+  async function persistProgress() {
+    persisting++; S.folderSyncing = true;
+    const snapshot = { index: S.index, done: S.done }, epoch = S.folder.epoch || null;
+    try {
+      const r = await folderRequest('save', { snapshot, epoch, base: S.progressBase });
+      if (r?.stale) { await reloadProgress(); throw Error(r.error || 'The index changed. Reload TIPS before saving more progress.'); }
+      if (!r || r.transport) {
+        if (hasChrome) {
+          const current = await store.get('indexFolder', { epoch: null });
+          if ((current.epoch || null) !== epoch) throw Error('The index folder changed. Reload TIPS.');
+          await chrome.storage.local.set({ ...snapshot, ...(r?.transport ? { indexFolder: S.folder } : {}) });
+        } else { await store.set('index', snapshot.index); await store.set('done', snapshot.done); }
+      } else if (!r.ok && !r.status) throw Error(r.error || 'Could not save index progress.');
+      S.progressBase = window.TIPSIndexCsv.stringify(snapshot.index, snapshot.done);
+      return !folderProblem();
+    } finally { S.folderSyncing = false; persisting--; }
+  }
+  function folderDetails() {
+    const f = S.folder;
+    return f.configured ? `${f.folderName} / ${f.filename}` : 'No folder selected — progress is saved in Chrome';
+  }
+  async function openFolderSettings() {
+    const r = await folderRequest('open');
+    if (!r?.ok) setMsg(r?.error || 'Open the extension Details page in Chrome, then Extension options.');
+  }
+
+  // ---------------------------------------------------------------- PDF downloads
+  function pdfScrubPolicy() {
+    const s = S.settings.pdfScrub;
+    const strings = String(s.strings || '').split(/[\n,]+/).map(x => x.trim()).filter(Boolean);
+    if (s.user && S.settings.user) strings.push(String(S.settings.user).trim());
+    return { enabled: !!s.enabled, timestamp: !!s.timestamp, strings: [...new Set(strings.filter(Boolean))] };
+  }
+  function compatiblePdfPolicy(policy) {
+    return !S.settings.pdfScrub.enabled || JSON.stringify(policy) === JSON.stringify(pdfScrubPolicy());
+  }
+  function isPdfDownload(name, response, data) {
+    if (/\.pdf$/i.test(name) || /^application\/(?:x-)?pdf\b/i.test(ctype(response))) return true;
+    // Attachments can have no extension or an application/octet-stream content type.
+    for (let i = 0; i < Math.min(data.length - 4, 1024); i++) {
+      if (data[i] === 37 && data[i + 1] === 80 && data[i + 2] === 68 && data[i + 3] === 70 && data[i + 4] === 45) return true;
+    }
+    return false;
+  }
+  async function addDownload(files, errors, stats, name, response, policy) {
+    let data = new Uint8Array(await response.arrayBuffer());
+    if (policy.enabled && isPdfDownload(name, response, data)) {
+      try {
+        if (!window.TIPSPdfScrubber) throw new Error('PDF engine unavailable');
+        const result = await window.TIPSPdfScrubber.scrub(data, policy);
+        data = result.bytes;
+        stats.pdfScrubbed++; stats.pdfTextRemoved += result.report.removedText.length;
+      } catch (e) {
+        stats.pdfScrubFailed++;
+        // Parser messages can quote source bytes. Never put those or the removed text in the ZIP/log.
+        const reason = !window.TIPSPdfScrubber ? 'PDF engine unavailable; reload the extension and TIPS tab'
+          : /encrypt/i.test(String(e)) ? 'encrypted PDF' : 'unsupported, damaged, or unreadable PDF';
+        errors.push(`${name}: PDF scrub failed (${reason}); PDF omitted.`);
+        return false;
+      }
+    }
+    files.push({ name, data });
+    return true;
   }
 
   // ---------------------------------------------------------------- export one document
   // item.opts (from the row picker): {versions: [n…], att: bool, doc} – only those versions, attachments optional,
   // and the topic data it already read. Without opts: the current version, every prior version and all attachments.
-  async function exportDoc(item, files, errors, step) {
-    const base = `${safe(item.tips)} - ${clip(item.title, 45)}`, o = item.opts || null;
+  async function exportDoc(item, files, errors, step, policy = pdfScrubPolicy()) {
+    const base = `${topicName(item)} (Requested)`, o = item.opts || null;
     step('topic data', { g: 'data' });
     let doc = o && o.doc;
     if (!doc) {
@@ -274,13 +557,16 @@
       doc = await jr.json();
     }
     const v = doc.version || item.version, want = n => !o || o.versions.includes(n);
+    let transient = 0;   // files that failed for a temporary reason (server/network) – the document is retried later
+    const failed = e => { if (e instanceof SessionError) throw e; if (e instanceof TransientError || (e && e.name === 'TypeError') || e.transient) transient++; };
     const F = S.settings.files;
+    const stats = { pdfScrubbed: 0, pdfTextRemoved: 0, pdfScrubFailed: 0 };
     if (F.docJson) files.push({ name: `${base}/${safe(item.tips)}_v${v}.json`, data: txt(JSON.stringify(doc, null, 2)) });
 
     if (want(v)) {
       step(`PDF v${v}`, { g: 'pdf', v });
       const pr = await get(`/tips/topic-service/api/v1/file/topics/${item.tipsId}/${v}?${Q()}`, 'application/pdf');
-      if (pr.ok) files.push({ name: `${base}/${safe(item.tips)}_v${v}.pdf`, data: new Uint8Array(await pr.arrayBuffer()) });
+      if (pr.ok) await addDownload(files, errors, stats, `${base}/${safe(item.tips)}_v${v}.pdf`, pr, policy);
       else errors.push(`${item.tips}: current PDF HTTP ${pr.status}`);
     }
 
@@ -299,9 +585,9 @@
           const ur = await get('/ats/public/attachment/v1/read/download/url?readKey=' + encodeURIComponent(rk), 'application/json');
           if (!ur.ok) throw new Error('url HTTP ' + ur.status);
           const uj = await ur.json(); const s3 = uj.url.startsWith('http') ? uj.url : 'https://' + uj.url;
-          const br = await fetch(s3); if (!br.ok) throw new Error('HTTP ' + br.status);
-          files.push({ name: `${dir}/${fn}`, data: new Uint8Array(await br.arrayBuffer()) }); nAtt++;
-        } catch (e) { if (e instanceof SessionError) throw e; errors.push(`${item.tips}: attachment "${fn}" ${e.message}`); }
+          const br = await fetch(s3); if (!br.ok) throw Object.assign(new Error('HTTP ' + br.status), { transient: br.status >= 500 || br.status === 403 });   // 403: signed link expired
+          if (await addDownload(files, errors, stats, `${dir}/${fn}`, br, policy)) nAtt++;
+        } catch (e) { failed(e); errors.push(`${item.tips}: attachment "${fn}" ${e.message}`); }
       }
       for (const r of refs) lines.push(['link/reference', r.tips || r.target || r.url || r.docNumber || JSON.stringify(r), loc(r.i18nTitle) || r.title || '', ''].map(csvEsc).join(','));
       if (F.attCsv) files.push({ name: `${dir}/_attachments_and_links.csv`, data: txt(lines.join('\r\n')) });
@@ -320,12 +606,18 @@
       step(`prior version v${pv}`, { g: 'prior', k: k + 1, n: priors.length, v: pv });
       try {
         const r = await get(`/tips/topic-service/api/v1/file/topics/${item.tipsId}/${pv}?${Q()}`, 'application/pdf');
-        if (r.ok) { files.push({ name: `${rdir}/${safe(item.tips)}_v${pv}.pdf`, data: new Uint8Array(await r.arrayBuffer()) }); nPrev++; }
+        if (r.ok) { if (await addDownload(files, errors, stats, `${base}/${safe(item.tips)}_v${pv}.pdf`, r, policy)) nPrev++; }
         else errors.push(`${item.tips}: v${pv} PDF HTTP ${r.status}`);
-      } catch (e) { if (e instanceof SessionError) throw e; errors.push(`${item.tips}: v${pv} ${e.message}`); }
+      } catch (e) {
+        // TIPS answers a version it doesn't have with HTTP 500 on the PDF endpoint (but 404 on the topic data):
+        // ask the topic data so a missing version is recorded once instead of being retried.
+        let gone = false;
+        if (e instanceof TransientError && /HTTP 500/.test(e.message)) { try { gone = (await get(`/tips/topic-service/api/v1/topics/${item.tipsId}/${pv}?${Q()}`, 'application/json', 1)).status === 404; } catch (x) { if (x instanceof SessionError) throw x; } }
+        if (gone) errors.push(`${item.tips}: v${pv} not available in TIPS`); else { failed(e); errors.push(`${item.tips}: v${pv} ${e.message}`); }
+      }
       await sleep(150);
     }
-    return { version: v, attachments: nAtt, attachmentsListed: atts.length, links: refs.length, prevVersions: nPrev, histEvents: hist.length };
+    return { version: v, attachments: nAtt, attachmentsListed: atts.length, links: refs.length, prevVersions: nPrev, histEvents: hist.length, transient, ...stats };
   }
 
   // ---------------------------------------------------------------- run documents -> zip
@@ -335,6 +627,7 @@
   const MAX_ZIP_MB = 400, capMB = () => +S.settings.maxZipMB || MAX_ZIP_MB;   // maxZipMB: hidden override (tests)
   async function runDocs(title, items, kind = 'bulk', exporter = exportDoc, carry = null) {
     const files = carry ? carry.files : [], errors = carry ? carry.errors : [], results = carry ? carry.results : [], all = carry ? carry.all : items;
+    const pdfPolicy = carry && carry.pdfPolicy || pdfScrubPolicy();
     let bytes = files.reduce((a, f) => a + f.data.length, 0), cur = 0, leftover = [];
     S.run = { title, kind, items: all, results, i: results.length, total: all.length, label: '', step: null, attN: 0, paused: false, cancel: false };
     render();
@@ -360,9 +653,9 @@
             if (info && info.g === 'att') S.run.attN = info.n;
             if (info && info.g === 'pdf') S.run.curPdf = true;
             if (S.run.kind !== 'bulk') renderRunBox(); else renderProgress();
-          });
+          }, pdfPolicy);
           for (let f = fMark; f < files.length; f++) bytes += files[f].data.length;
-          results.push({ ...it, ...r, status: 'ok' });
+          results.push({ ...it, ...r, status: r.pdfScrubFailed ? `FAILED: ${r.pdfScrubFailed} PDF(s) could not be scrubbed` : r.transient ? `incomplete: ${r.transient} file(s) failed` : 'ok' });
         } catch (e) {
           if (e instanceof SessionError) { files.length = fMark; errors.length = eMark; throw e; }   // redo this document on resume
           results.push({ ...it, status: 'FAILED: ' + e.message }); errors.push(`${it.tips}: ${e.message}`);
@@ -371,40 +664,48 @@
     } catch (e) {
       S.run = null;
       if (e instanceof SessionError) {
-        S.resume = { title, kind, exporter, remaining: items.slice(cur), carry: { files, errors, results, all }, finish: null };
+        S.resume = { title, kind, exporter, remaining: items.slice(cur), carry: { files, errors, results, all, pdfPolicy, layout: OUTPUT_LAYOUT, indexEpoch: S.folder.epoch || null }, finish: null, n: S.runMeta && S.runMeta.n, sg: S.runMeta && S.runMeta.sg };
+        keepResume();
         setMsg(`⚠ ${e.message}. ${results.length} of ${all.length} done and kept – log in to XENTRY again in this tab, then click Resume.`);
       } else setMsg(e.message === 'cancelled' ? `${title} cancelled – nothing saved.` : `${title} failed: ` + e.message);
       render(); return null;
     }
     S.run = null;
-    return { files, errors, results, leftover };
+    return { files, errors, results, leftover, pdfPolicy };
   }
-  const busy = () => !!(S.run || S.pending || S.resume);
+  const busy = () => !!(S.run || S.pending || S.approving || S.importing || S.resume || S.folderLock || S.folderSyncing);
+  const MAX_TRIES = 3;
   async function resumeRun() {
     const r = S.resume; if (!r || S.run) return;
+    if (!compatiblePdfPolicy(r.carry.pdfPolicy)) { discardResume(); setMsg('PDF scrub rules changed. Start this download again to process every PDF with the current rules.'); return; }
     S.resume = null; S.msg = '';
+    S.runMeta = { n: r.n, sg: r.sg };
     const out = await runDocs(r.title, r.remaining, r.kind, r.exporter, r.carry);
-    if (!out) { if (S.resume) S.resume.finish = r.finish; return; }
+    if (!out) { if (S.resume) S.resume.finish = r.finish; else keep('resume', null); return; }   // the kept copy stays until the run finishes
+    keep('resume', null);
     await r.finish(out);
   }
-  function discardResume() { if (!S.resume) return; S.resume = null; setMsg('Interrupted download discarded – nothing saved.'); }
+  function discardResume() { if (!S.resume) return; S.resume = null; keep('resume', null); setMsg('Interrupted download discarded – nothing saved.'); }
   function manifestCsv(results) {
     const man = ['tips,title,version,attachments_saved,attachments_listed,links,prior_versions_saved,history_events,status'];
     for (const r of results) man.push([r.tips, r.title, r.version, r.attachments, r.attachmentsListed, r.links, r.prevVersions, r.histEvents, r.status].map(csvEsc).join(','));
     return man.join('\r\n');
   }
+  const isInc = r => /^incomplete/.test(r.status || '');
   function summarize(fname, blob, results, errors) {
-    const ok = results.filter(r => r.status === 'ok');
-    return { fname, sizeMB: +(blob.size / 1048576).toFixed(2), docs: results.length, ok: ok.length, range: results.length ? `${results[0].tips} → ${results[results.length - 1].tips}` : '', att: ok.reduce((a, r) => a + r.attachments, 0), prev: ok.reduce((a, r) => a + r.prevVersions, 0), errors };
+    const ok = results.filter(r => r.status === 'ok' || isInc(r));
+    return { fname, sizeMB: +(blob.size / 1048576).toFixed(2), docs: results.length, ok: ok.length, inc: results.filter(isInc).length, range: results.length ? `${results[0].tips} → ${results[results.length - 1].tips}` : '', att: ok.reduce((a, r) => a + r.attachments, 0), prev: ok.reduce((a, r) => a + r.prevVersions, 0),
+      pdfScrubbed: results.reduce((n, r) => n + (r.pdfScrubbed || 0), 0), pdfTextRemoved: results.reduce((n, r) => n + (r.pdfTextRemoved || 0), 0), pdfScrubFailed: results.reduce((n, r) => n + (r.pdfScrubFailed || 0), 0), errors };
   }
 
   // ---------------------------------------------------------------- bulk batch (next N pending docs)
   async function prepareBatch() {
-    if (busy()) return;
+    if (busy() || S.checking || (S.single && S.single.phase === 'looking')) return;   // one thing at a time
     if (!sessionOK()) { setMsg('Session values missing – open Settings and fill Outlet / User, or open any topic once so they can be detected.'); return; }
     const items = pendingItems().slice(0, S.settings.batchSize);
     if (!items.length) { setMsg('Everything in the index is exported.'); return; }
     const n = nextBatch();
+    S.runMeta = { n };
     const out = await runDocs(`Batch ${n}`, items, 'bulk');
     if (!out) { if (S.resume) S.resume.finish = o => finishBatch(n, o); return; }
     await finishBatch(n, out);
@@ -420,35 +721,59 @@
     if (errors.length) files.unshift({ name: `_batch_${p}_errors.txt`, data: txt(errors.join('\r\n')) });
     const blob = makeZip(files);
     const fname = `TIPS_LI_Batch_${p}.zip`;
-    S.pending = { kind: 'batch', n, blob, fname, results, summary: summarize(fname, blob, results, errors) };
+    S.pending = { kind: 'batch', n, blob, fname, results, pdfPolicy: out.pdfPolicy, summary: summarize(fname, blob, results, errors) };
+    keepPending();
     setMsg(leftover.length ? `Batch ${n} reached ${capMB()} MB after ${results.length} documents – ready for review. The other ${leftover.length} stay pending for the next batch.` : `Batch ${n} ready for review.`);
     render();
     if (S.settings.autoApprove) approve();
   }
   async function approve() {
     const p = S.pending; if (!p) return;
-    saveBlob(p.blob, p.fname);
-    const now = new Date().toISOString();
-    for (const r of p.results) if (r.status === 'ok') S.done[r.tipsId] = { b: p.n, d: now, v: r.version };
-    S.history.push({ ...p.summary, n: p.n, errors: p.summary.errors.length, date: now });
-    await saveDone(); await saveHistory();
-    S.pending = null;
-    railFlash = Date.now() + 6000; setTimeout(render, 6100);
-    setMsg(`Downloaded ${p.fname}.`);
-    render();
-    if (S.settings.autoContinue && nextBatch()) setTimeout(() => prepareBatch(), Math.max(800, randDelay()));
+    if (!compatiblePdfPolicy(p.pdfPolicy)) { discard(); setMsg('PDF scrub rules changed. Prepare this batch again to process every PDF with the current rules.'); return; }
+    S.approving = true;
+    S.pending = null;   // claim it now: a second click (or Discard) while saving does nothing
+    try {
+      keep('pending', null);
+      saveBlob(p.blob, p.fname);
+      const now = new Date().toISOString(), cur = new Map(S.index.map(x => [String(x.tipsId), x]));
+      // A newer version found after this batch was built stays pending, so it is exported in a later batch.
+      let gaveUp = 0;
+      for (const r of p.results) {
+        const x = cur.get(String(r.tipsId)), same = !x || +x.version === +r.version;
+        if (r.status === 'ok') { if (same) { S.done[r.tipsId] = { b: p.n, d: now, v: r.version }; delete S.retry[r.tipsId]; } }
+        else if (isInc(r) && same) {   // some files failed temporarily: try the document again in a later batch, at most 3 times
+          S.retry[r.tipsId] = (S.retry[r.tipsId] || 0) + 1;
+          if (S.retry[r.tipsId] >= MAX_TRIES) { S.done[r.tipsId] = { b: p.n, d: now, v: r.version, missing: r.transient }; delete S.retry[r.tipsId]; gaveUp++; }
+        }
+      }
+      await store.set('retry', S.retry);
+      S.history.push({ ...p.summary, n: p.n, errors: p.summary.errors.length, date: now });
+      await saveDone(); await saveHistory();
+      railFlash = Date.now() + 6000; setTimeout(render, 6100);
+      const inc = p.results.filter(isInc).length - gaveUp;
+      const scrubFailed = p.results.some(r => r.pdfScrubFailed);
+      setMsg(`Downloaded ${p.fname}.` + (scrubFailed ? ' Some PDFs could not be scrubbed. Their documents stay pending; auto-continue stopped. See the batch errors file.' : '') + (inc ? ` ${inc} incomplete document(s) stay pending and are tried again in the next batch.` : '') + (gaveUp ? ` ${gaveUp} document(s) still had missing files after ${MAX_TRIES} tries and are marked exported – see the batch errors file.` : ''));
+      if (S.settings.autoContinue && nextBatch() && !scrubFailed && !folderProblem()) setTimeout(autoNext, Math.max(800, randDelay()));
+    } finally {
+      S.approving = false;
+      render();
+    }
+  }
+  // Auto-continue: start the next batch once nothing else is running (e.g. a Check new that started meanwhile).
+  async function autoNext() {
+    for (let i = 0; i < 600 && (S.checking || (S.single && S.single.phase === 'looking')); i++) await sleep(500);
+    if (S.settings.autoContinue && nextBatch() && !busy() && !folderProblem()) try { await prepareBatch(); } catch (e) { setMsg((e instanceof SessionError ? '⚠ ' : 'Error: ') + e.message); }
   }
   function discard() {
     if (!S.pending) return;
     setMsg(`Discarded ${S.pending.fname} – those documents stay pending.`);
-    S.pending = null; render();
+    S.pending = null; keep('pending', null); render();
   }
 
   // ---------------------------------------------------------------- specific LI download
   const FULL_NO = /^[A-Z]{2}\d{2}\.\d{2}-[A-Z]-\d{6}$/;
   async function searchByNumber(no) {
-    const r = await fetch('/tips/topic-service/api/v1/topics/search?' + Q(), { method: 'POST', credentials: 'include', headers: H(), body: JSON.stringify({ ...DEFAULT_SEARCH, docName: no, pagination: { pageNumber: 1, pageSize: 10 } }) });
-    if (r.status === 401 || r.status === 403) throw new SessionError('Session expired (HTTP ' + r.status + ')');
+    const r = await searchPost({ ...DEFAULT_SEARCH, docName: no, pagination: { pageNumber: 1, pageSize: 10 } });
     if (!r.ok) throw new Error('search HTTP ' + r.status);
     const j = await r.json();
     const h = (j.hits || []).find(x => String(x.tips).toUpperCase() === no);
@@ -482,8 +807,7 @@
     const size = S.settings.pageSize || 20, out = [], seen = new Set(); let total = 0;
     for (let p = 1; p <= 200; p++) {
       setMsg(`Reading your TIPS search… page ${p}${total ? ' of ' + Math.ceil(total / size) : ''}`);
-      const r = await fetch('/tips/topic-service/api/v1/topics/search?' + Q(), { method: 'POST', credentials: 'include', headers: H(), body: JSON.stringify({ ...base, totalHitsCountOnly: false, pagination: { pageNumber: p, pageSize: size } }) });
-      if (r.status === 401 || r.status === 403) throw new SessionError('Session expired (HTTP ' + r.status + ')');
+      const r = await searchPost({ ...base, totalHitsCountOnly: false, pagination: { pageNumber: p, pageSize: size } });
       if (!r.ok) throw new Error('Search failed: HTTP ' + r.status);
       const j = await r.json(); total = j.totalHits || 0;
       if (total > SEARCH_LIMIT) throw new Error(`Your TIPS search found ${fmtN(total)} topics – narrow it to ${SEARCH_LIMIT} or fewer, or use Bulk export.`);
@@ -523,7 +847,7 @@
   }
   const verTag = o => { if (!o) return ''; const v = o.versions;
     return (o.allVers ? '' : v.length === 1 ? `_v${v[0]}` : v.every((x, i) => !i || x === v[i - 1] + 1) ? `_v${v[0]}-v${v.at(-1)}` : '_v' + v.join('_v')) + (o.dropAtt ? '_no-attachments' : ''); };
-  const selectionName = found => found.length === 1 ? `TIPS_${safe(found[0].tips)}${verTag(found[0].opts)}.zip` : `TIPS_selection_${new Date().toISOString().slice(0, 10)}_${found.length}docs.zip`;
+  const selectionName = found => found.length === 1 ? `${topicName(found[0])}${verTag(found[0].opts)}.zip` : `TIPS_selection_${new Date().toISOString().slice(0, 10)}_${found.length}docs.zip`;
   async function lookupSpecific(text) {
     if (busy()) { setMsg('Finish, resume or discard the current download first.'); return; }
     if (!sessionOK()) { setMsg('Session values missing – open ⚙ Settings.'); return; }
@@ -538,17 +862,23 @@
   async function downloadFound() {
     const sg = S.single;
     if (!sg || sg.phase !== 'looked' || !sg.found.length || busy()) return;
+    S.runMeta = { sg: { found: sg.found, problems: sg.problems } };
     const out = await runDocs(sg.found.length === 1 ? sg.found[0].tips : `${sg.found.length} documents`, sg.found, 'single');
     if (!out) { if (S.resume) S.resume.finish = o => finishSingle(sg, o); return; }   // cancelled or session lost
     await finishSingle(sg, out);
   }
   async function finishSingle(sg, out) {
+    if (!compatiblePdfPolicy(out.pdfPolicy)) {
+      S.single = { ...sg, phase: 'looked' };
+      setMsg('PDF scrub rules changed during the export. Download again to process every PDF with the current rules. Nothing was saved.');
+      return;
+    }
     const found = sg.found, { files, errors, results, leftover } = out;
     const problems = [...sg.problems, ...leftover.map(it => ({ token: it.tips, kind: 'capped', text: `Not downloaded – the zip reached ${capMB()} MB. Download it separately.`, msg: `${it.tips}: not downloaded (zip size limit)` }))];
     if (S.settings.files.manifest) files.unshift({ name: `_manifest.csv`, data: txt(manifestCsv(results)) });
     if (errors.length || problems.length) files.unshift({ name: `_errors.txt`, data: txt([...problems.map(p => p.msg), ...errors].join('\r\n')) });
     const blob = makeZip(files);
-    const done = results.filter(r => r.status === 'ok'), fname = selectionName(found);
+    const done = results.filter(r => r.status === 'ok' || isInc(r)), fname = selectionName(found);
     saveBlob(blob, fname);   // explicit request -> download straight away; does not change bulk-export progress
     const sum = summarize(fname, blob, results, errors);
     S.single = { phase: 'done', fname, sum, problems };
@@ -572,7 +902,7 @@
   const EXT_VERSION = (hasChrome && chrome.runtime && chrome.runtime.getManifest && chrome.runtime.getManifest().version) || 'dev';
   const HELP_URL = 'https://github.com/MaydayDragal/TIPs-Exporter#readme';
   let diag = null;   // results of "Check setup"
-  const S_FIELDS = ['s_bs', 's_delay', 's_delay2', 's_ps', 's_outlet', 's_user', 's_ver'];
+  const S_FIELDS = ['s_bs', 's_delay', 's_delay2', 's_ps', 's_outlet', 's_user', 's_ver', 's_pdfStrings'];
   const css = `
   :host{all:initial}
   *{box-sizing:border-box}
@@ -681,6 +1011,7 @@
   }, true);
   let returnFocus = null;
   function openDrawer(open) {
+    if (open && typeof closeNotice === 'function') closeNotice();
     if (open && pick) closePick(null);
     if (open && !visible) { justOpened = true; returnFocus = document.activeElement; }
     const wasVisible = visible;
@@ -745,7 +1076,7 @@
         <button class="b bar" id="cursearch" ${blocked || looking ? 'disabled' : ''}>Use search</button></div>`;
     body += vRecent(sg);
     const actions = looked
-      ? `<button class="b bar" id="clear">Clear</button><button class="b pri" id="dlfound" ${sg.found.length ? '' : 'disabled'}>${I.dl}Download ${sg.found.length || ''}</button>`
+      ? `<button class="b bar" id="clear">Clear</button><button class="b pri" id="dlfound" ${sg.found.length && !blocked ? '' : 'disabled'}>${I.dl}Download ${sg.found.length || ''}</button>`
       : `<button class="b pri" id="look" ${blocked || looking ? 'disabled' : ''}>${I.search}${looking ? 'Looking up…' : 'Look up'}</button>`;
     return { body, actions };
   }
@@ -765,15 +1096,15 @@
     let steps = '';
     if (st) {
       const L = [];
-      L.push(gi <= 1 ? ['cur', st.g === 'data' ? 'Topic data' : `Current PDF v${st.v}`] : ['done', run.curPdf ? 'Topic data &amp; current PDF' : 'Topic data']);
+      L.push(gi <= 1 ? ['cur', st.g === 'data' ? 'Topic data' : `Current PDF v${esc(st.v)}`] : ['done', run.curPdf ? 'Topic data &amp; current PDF' : 'Topic data']);
       if (run.attN) L.push(gi === 2 ? ['cur', `Attachment ${st.k} of ${st.n}`] : gi > 2 ? ['done', `${run.attN} attachment${run.attN > 1 ? 's' : ''}`] : null);
-      if (gi === 3) L.push(['cur', `Prior version v${st.v} – ${st.k} of ${st.n}`]);
+      if (gi === 3) L.push(['cur', `Prior version v${esc(st.v)} – ${st.k} of ${st.n}`]);
       steps = `<ol class="steps">${L.filter(Boolean).map(([k, t]) => k === 'done' ? `<li class="mut"><span class="okc">✓</span>${t}</li>` : `<li><span class="acc spin">${svg('<circle cx="12" cy="12" r="8" stroke-opacity=".25"></circle><path d="M12 4a8 8 0 0 1 8 8"></path>', 16, 2.4)}</span>${t}</li>`).join('')}</ol>`;
     }
     return `<div class="sec"><div class="sp"><h3>Downloading</h3><span style="font-size:16px">Document ${Math.min(doneN + 1, run.total)} of ${run.total}</span></div>${pbar(100 * (doneN + frac) / run.total, false, 'pbar')}</div>
       ${run.items.map((it, k) => {
         const r = run.results[k];
-        if (r) return `<div class="card"><div class="bd"><div class="sp"><span>${esc(it.tips)}</span>${r.status === 'ok' ? '<span class="okc">✓ done</span>' : '<span class="erc">failed</span>'}</div></div></div>`;
+        if (r) return `<div class="card"><div class="bd"><div class="sp"><span>${esc(it.tips)}</span>${r.status === 'ok' ? '<span class="okc">✓ done</span>' : isInc(r) ? '<span class="alc">incomplete</span>' : '<span class="erc">failed</span>'}</div></div></div>`;
         if (k === doneN) return `<div class="card sel"><div class="bd" style="gap:8px"><div class="sp"><b>${esc(it.tips)}</b><span class="acc">in progress</span></div>
           ${steps || `<span class="mut" id="plabel">${esc(runLabel(run))}</span>`}</div></div>`;
         return `<div class="card"><div class="bd"><div class="sp"><span class="mut">${esc(it.tips)}</span><span class="mut">queued</span></div></div></div>`;
@@ -783,7 +1114,7 @@
   function vSingleDone(sg) {
     const m = sg.sum, np = sg.problems.length;
     const body = banner('ok', 'Saved to Downloads', `<span class="mut" style="overflow-wrap:anywhere">${esc(sg.fname)}</span>`)
-      + kv([['Size', `${m.sizeMB} MB`], ['Documents', `${m.ok} of ${m.docs}`], ['Attachments', m.att], ['Prior versions', m.prev]])
+      + kv([['Size', `${m.sizeMB} MB`], ['Documents', `${m.ok} of ${m.docs}${m.inc ? ` (${m.inc} with missing files)` : ''}`], ['Attachments', m.att], ['Prior versions', m.prev], ['PDFs scrubbed', `${m.pdfScrubbed || 0} (${m.pdfTextRemoved || 0} text blocks removed)`]])
       + (m.errors.length ? banner('er', `${m.errors.length} file${m.errors.length > 1 ? 's' : ''} could not be saved`, `<details><summary>Show details</summary><pre>${esc(m.errors.join('\n'))}</pre></details><span class="mut sm">Also listed in _errors.txt inside the zip.</span>`) : '')
       + (np ? banner('al', `${np} entr${np > 1 ? 'ies' : 'y'} skipped`, sg.problems.map(p => `<span>${esc(p.token)} – ${esc(p.text)}</span>`).join(''), '<button class="b bar sm" id="fix" style="align-self:center">Fix</button>') : '')
       + vRecent(sg);
@@ -811,9 +1142,11 @@
         <div class="cnt">Total topics : <span class="badge">${S.index.length ? fmtN(S.index.length) : '0'}</span></div>
         <div style="display:flex;gap:24px;flex-wrap:wrap"><span>Exported : <b>${fmtN(dc)}</b></span><span>Pending : <b>${fmtN(pendN)}</b></span><span>Next batch : <b>${nb ?? '–'}</b></span></div>
         ${pbar(pct)}<span class="mut">${pct.toFixed(1)}% · about ${remainingBatches()} batches of ${s.batchSize} left</span></div>`;
+    body += `<div class="sec"><b>Index folder</b><span class="mut sm">${esc(folderDetails())}</span>${folderProblem() ? `<span class="alc sm">${esc(S.folder.message || 'Folder sync needs attention. Open Settings.')} Auto-continue is paused.</span>` : ''}</div>`;
     let actions = '';
     const toggles = `<div class="rule"><label class="tg">Auto-continue after each download<input type="checkbox" class="tgl" id="autoc" ${s.autoContinue ? 'checked' : ''}></label>
-        <label class="tg">Auto-approve (download without asking)<input type="checkbox" class="tgl" id="autoa" ${s.autoApprove ? 'checked' : ''}></label></div>`;
+        <label class="tg">Auto-approve (download without asking)<input type="checkbox" class="tgl" id="autoa" ${s.autoApprove ? 'checked' : ''}></label>
+        <label class="tg">Check for new topics whenever TIPS loads<input type="checkbox" class="tgl" id="autock" ${s.autoCheck ? 'checked' : ''}></label></div>`;
     if (run) {
       body += `<div class="sec"><div class="sp"><h3>${esc(run.title)}${run.paused ? ' <span class="alc" style="font:14px var(--f)">· paused</span>' : ''}</h3><span style="font-size:16px">Document ${run.i} of ${run.total}</span></div>
           ${pbar(100 * (run.i - 1) / run.total, false, 'pbar')}</div>
@@ -826,20 +1159,22 @@
     } else if (pen) {
       const m = pen.summary;
       body = banner('ok', `Batch ${pen.n} is ready`, `<span class="mut">${esc(m.fname)}</span>`)
-        + kv([['Size', `${m.sizeMB} MB`], ['Documents', `${m.ok} of ${m.docs}`], ['Attachments', m.att], ['Prior versions', m.prev], ['Range', m.range]])
+        + kv([['Size', `${m.sizeMB} MB`], ['Documents', `${m.ok} of ${m.docs}${m.inc ? ` (${m.inc} incomplete – retried next batch)` : ''}`], ['Attachments', m.att], ['Prior versions', m.prev], ['PDFs scrubbed', `${m.pdfScrubbed || 0} (${m.pdfTextRemoved || 0} text blocks removed)`], ['Range', m.range]])
         + (m.errors.length ? banner('al', `${m.errors.length} file${m.errors.length > 1 ? 's' : ''} could not be saved`, `<details><summary>Show details</summary><pre>${esc(m.errors.join('\n'))}</pre></details>`) : '<span class="okc">No errors</span>');
       actions = `<button class="b bar" id="discard">Discard</button><button class="b pri" id="approve">${I.check}Approve &amp; download</button>`;
     } else {
+      const ck = S.checking || busy() || !!(S.single && S.single.phase === 'looking'), lc = S.lastCheck;
       body += toggles + `<div class="sec"><h3>Index &amp; progress log</h3><div class="grid2">
-          <button class="b bar" id="refresh" ${!S.index.length ? 'disabled' : ''}>${I.redo}Check new</button>
-          <button class="b bar" id="build">${S.index.length ? 'Rebuild index' : 'Build index'}</button>
-          <button class="b bar" id="imp">Import log</button>
+          <button class="b bar" id="refresh" ${!S.index.length || ck ? 'disabled' : ''} title="Checks the most recently changed topics for new topics and new versions. Shift+click compares every topic.">${S.checking ? `<span class="spin">${svg('<circle cx="12" cy="12" r="8" stroke-opacity=".25"></circle><path d="M12 4a8 8 0 0 1 8 8"></path>', 16, 2.4)}</span>Checking…` : I.redo + 'Check new'}</button>
+          <button class="b bar" id="build" ${ck ? 'disabled' : ''}>${S.index.length ? 'Rebuild index' : 'Build index'}</button>
+          <button class="b bar" id="imp" ${ck ? 'disabled' : ''}>Import log</button>
           <button class="b bar" id="exp" ${!S.index.length ? 'disabled' : ''}>${I.dl}Save log</button>
-        </div><input type="file" id="file" accept=".csv" style="display:none"></div>`;
+        </div><input type="file" id="file" accept=".csv" style="display:none">
+        ${lc ? `<span class="mut sm">Last check ${esc(when(lc.at))}: ${lc.fresh} new, ${lc.updated} updated${checkPending() ? ` · ${checkPending()} waiting to be exported` : ''}</span>` : ''}</div>`;
       if (S.history.length) body += `<details><summary>Batch history (${S.history.length})<span>›</span></summary>
           <table><tr><th>#</th><th>Size</th><th>Docs</th><th>Att.</th><th>Prev.</th><th>Err.</th></tr>
           ${S.history.slice().reverse().map(x => `<tr><td>${x.n}</td><td>${x.sizeMB} MB</td><td>${x.ok}/${x.docs}</td><td>${x.att}</td><td>${x.prev}</td><td>${x.errors}</td></tr>`).join('')}</table></details>`;
-      actions = `<button class="b pri" id="prep" ${!S.index.length || !nb ? 'disabled' : ''}>${I.dl}${nb ? `Prepare batch ${nb} · ${Math.min(s.batchSize, pendN)} documents` : S.index.length ? 'Everything exported' : 'Build the index first'}</button>`;
+      actions = `<button class="b pri" id="prep" ${!S.index.length || !nb || ck ? 'disabled' : ''}>${I.dl}${nb ? `Prepare batch ${nb} · ${Math.min(s.batchSize, pendN)} documents` : S.index.length ? 'Everything exported' : 'Build the index first'}</button>`;
     }
     return { body, actions };
   }
@@ -852,9 +1187,25 @@
       <label class="fld">Delay between documents (ms) <span class="pair"><input class="s" type="number" id="s_delay" value="${s.delayMs}" min="0" step="250" aria-label="Minimum delay"> – <input class="s" type="number" id="s_delay2" value="${s.delayMaxMs}" min="0" step="250" aria-label="Maximum delay"></span></label>
       <label class="fld">Search page size <span class="pair"><span class="${s.pageSizeSrc === 'detected' ? 'okc' : s.pageSizeSrc === 'manual' ? 'mut' : 'alc'}">${s.pageSizeSrc === 'detected' ? '✓ matches TIPS' : s.pageSizeSrc === 'manual' ? 'set manually' : 'not detected yet'}</span><input class="s" type="number" id="s_ps" value="${s.pageSize}" min="1" max="500"></span></label>
       <label class="fld">Outlet <input type="text" id="s_outlet" value="${esc(s.outlet)}"></label>
-      <label class="fld">User <input type="text" id="s_user" value="${esc(s.user)}"></label>
+      <label class="fld">User <input type="text" id="s_user" value="${esc(s.user)}" ${busy() && s.pdfScrub.enabled ? 'disabled' : ''}></label>
       <label class="fld">Reader version <input type="text" id="s_ver" value="${esc(s.ver)}"></label>
-      <div class="sec" style="padding-top:12px;border-top:1px solid var(--div)"><b>Data files to include</b><span class="mut">PDFs and attachments are always saved.</span>
+      <div class="sec" style="padding-top:12px;border-top:1px solid var(--div)"><b>PDF scrubbing</b>
+        <label class="ck"><input type="checkbox" id="s_pdfEnabled" ${s.pdfScrub.enabled ? 'checked' : ''} ${busy() ? 'disabled' : ''}> Automatically scrub PDFs before saving</label>
+        <span class="mut">Applies to current PDFs, prior versions and PDF attachments. Removes document metadata locally before files enter the ZIP.</span>
+        <label class="ck"><input type="checkbox" id="s_pdfUser" ${s.pdfScrub.user ? 'checked' : ''} ${busy() ? 'disabled' : ''}> Remove the detected session user ID</label>
+        <label class="ck"><input type="checkbox" id="s_pdfTimestamp" ${s.pdfScrub.timestamp ? 'checked' : ''} ${busy() ? 'disabled' : ''}> Remove the print date and time stamp</label>
+        <label class="sec" style="gap:6px">Additional text to remove (one per line or comma-separated)
+          <textarea id="s_pdfStrings" rows="2" spellcheck="false" ${busy() ? 'disabled' : ''}>${esc(s.pdfScrub.strings)}</textarea>
+        </label>
+        <span class="mut sm">All text in matching blocks is removed. Page numbers and copyright remain when they are in separate blocks. Scanned image text is not removed. PDFs that cannot be processed are omitted and listed in the export errors.</span>
+        ${busy() ? '<span class="mut sm">Finish or discard the current download before changing PDF scrub rules.</span>' : ''}
+      </div>
+      <div class="sec" style="padding-top:12px;border-top:1px solid var(--div)"><b>Index folder</b>
+        <span class="mut">${esc(folderDetails())}</span>
+        <span class="${folderProblem() ? 'alc' : 'mut'} sm">${esc(S.folder.message || 'Choose a folder to load and automatically update its index. Future versions can use the same folder.')}</span>
+        <button class="b bar" id="s_indexFolder" ${busy() || S.checking ? 'disabled' : ''}>Choose / change index folder…</button>
+      </div>
+      <div class="sec" style="padding-top:12px;border-top:1px solid var(--div)"><b>Data files to include</b><span class="mut">All PDF versions share the topic folder; attachments go in Attachments and Links. Optional data files are off by default. Any failures are listed in the export errors.</span>
         <div class="fgrid">
           <label class="ck"><input type="checkbox" id="f_docJson" ${s.files.docJson ? 'checked' : ''}> Document data <code>.json</code></label>
           <label class="ck"><input type="checkbox" id="f_histCsv" ${s.files.histCsv ? 'checked' : ''}> Revision history <code>.csv</code></label>
@@ -871,7 +1222,7 @@
         ${diag ? `<div class="kv">${diag.map(([ok, a, b]) => `<div><span>${ok === true ? '<span class="okc">✓</span>' : ok === false ? '<span class="erc">✗</span>' : '<span class="mut">–</span>'} ${esc(a)}</span><span>${esc(b)}</span></div>`).join('')}</div>` : ''}
         <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center"><button class="b bar sm" id="s_check">Check setup</button><a class="sm" href="${HELP_URL}" target="_blank" rel="noopener" style="color:var(--blue)">Help &amp; instructions</a></div>
       </div>`;
-    return { body, actions: '<button class="b bar" id="s_detect">Re-detect session</button><button class="b pri" id="s_save">Save</button>' };
+    return { body, actions: `<button class="b bar" id="s_detect" ${busy() && s.pdfScrub.enabled ? 'disabled' : ''}>Re-detect session</button><button class="b pri" id="s_save">Save</button>` };
   }
 
   function checkSetup() {
@@ -880,11 +1231,13 @@
     const cv = (navigator.userAgent.match(/Chrome\/(\d+)/) || [])[1];
     return [
       [sessionOK(), 'Session', sessionOK() ? `user ${s.user} · outlet ${s.outlet} · Reader v${s.ver}` : 'not detected – open any topic, then Re-detect session'],
+      [!!window.TIPSPdfScrubber, 'PDF scrubber', window.TIPSPdfScrubber ? (s.pdfScrub.enabled ? 'bundled engine ready; automatic scrubbing on' : 'bundled engine ready; scrubbing off') : 'not loaded – reload the extension and TIPS tab'],
       [s.pageSizeSrc === 'default' ? false : true, 'Search page size', s.pageSizeSrc === 'detected' ? `${s.pageSize} – matches TIPS` : s.pageSizeSrc === 'manual' ? `${s.pageSize} – set manually` : 'not seen yet – run any search in TIPS'],
       [!!nav, 'Drawer position', nav ? `under the header (${topOffset()} px)` : 'header not found – using 56 px'],
       [!!(document.getElementById('auxMenu0') || document.querySelector('footer xy-c-aux-menu')), '⋮ menu', document.getElementById('auxMenu0') ? 'found – TIPS Exporter is added under Settings' : 'not found – use the toolbar icon to open the exporter'],
       [topic ? !!document.querySelector('neo-topic-detail button.xy-i-print') : null, 'Topic toolbar button', topic ? (document.querySelector('button.tipsx-dl') ? 'shown next to Print' : 'Print button not found') : 'open a topic to check'],
       [fontOk, 'TIPS fonts', fontOk ? 'in use' : fontOk === false ? 'not loaded – using Arial/Georgia' : 'could not check'],
+      [S.folder.configured ? !folderProblem() : null, 'Index folder', folderDetails()],
       [S.index.length ? true : null, 'Index', S.index.length ? `${fmtN(S.index.length)} topics, ${fmtN(doneCount())} exported` : 'not built (only needed for bulk export and short LI endings)'],
       [cv ? +cv >= 111 : null, 'Chrome', cv ? `version ${cv}` : 'unknown'],
       [true, 'Extension', `v${EXT_VERSION}`]];
@@ -894,7 +1247,8 @@
     syncRail();
     if (!visible) { root.innerHTML = ''; syncToolbar(); syncRows(); return; }
     // keep typing focus and scroll position across re-renders
-    const ae = root.activeElement, focusLi = ae && ae.id === 'li', selA = focusLi ? ae.selectionStart : 0, selB = focusLi ? ae.selectionEnd : 0;
+    const ae = root.activeElement, focusId = ae && ae.id, focusLi = focusId === 'li';
+    let selA = 0, selB = 0; try { if (ae && typeof ae.selectionStart === 'number') { selA = ae.selectionStart; selB = ae.selectionEnd; } } catch (e) { }
     const oldBody = root.querySelector('.body'), scroll = oldBody && lastView === view ? oldBody.scrollTop : 0; lastView = view;
     const s = S.settings, run = S.run, T = topOffset();
     const status = run ? (run.kind === 'single' ? '<span class="st acc">● Downloading</span>' : run.paused ? `<span class="st alc">● ${esc(run.title)} paused</span>` : `<span class="st acc">● ${esc(run.title)} running</span>`)
@@ -920,7 +1274,7 @@
     const focusOnOpen = justOpened; justOpened = false;
     const $ = id => root.getElementById(id);
     const on = (id, ev, fn) => { const el = $(id); if (el) el[ev] = fn; };
-    const safeRun = fn => async () => { try { await fn(); } catch (e) { S.run = null; setMsg((e instanceof SessionError ? '⚠ ' : 'Error: ') + e.message); } };
+    const safeRun = fn => async () => { try { await fn(); } catch (e) { setMsg((e instanceof SessionError ? '⚠ ' : 'Error: ') + e.message); } };
     const focusBox = () => { const t = $('li'); if (t) { t.focus(); t.selectionStart = t.selectionEnd = t.value.length; } };
     on('dim', 'onclick', () => openDrawer(false));
     on('close', 'onclick', () => openDrawer(false));
@@ -955,17 +1309,24 @@
     on('discard', 'onclick', discard);
     on('prep', 'onclick', safeRun(prepareBatch));
     on('autoc', 'onchange', async e => { s.autoContinue = e.target.checked; await saveSettings(); });
+    on('autock', 'onchange', async e => { s.autoCheck = e.target.checked; await saveSettings(); });
     on('autoa', 'onchange', async e => {
       if (e.target.checked && !confirm('Auto-approve downloads every batch without asking. Continue?')) { e.target.checked = false; return; }
       s.autoApprove = e.target.checked; await saveSettings();
     });
     on('build', 'onclick', safeRun(buildIndex));
-    on('refresh', 'onclick', safeRun(refreshIndex));
+    on('refresh', 'onclick', e => safeRun(() => refreshIndex(!!e.shiftKey))());
     on('imp', 'onclick', () => $('file').click());
-    on('file', 'onchange', safeRun(async () => { const f = $('file').files[0]; if (f) await importLog(await f.text()); }));
+    on('file', 'onchange', safeRun(async () => {
+      const f = $('file').files[0]; if (!f || busy() || S.checking) return;
+      S.importing = true; render();
+      try { await importLog(await f.text()); }
+      finally { S.importing = false; render(); }
+    }));
     on('exp', 'onclick', () => saveBlob(new Blob([progressCsv()], { type: 'text/csv' }), `TIPS_progress_log_${new Date().toISOString().slice(0, 10)}.csv`));
 
     // settings
+    on('s_indexFolder', 'onclick', openFolderSettings);
     on('s_save', 'onclick', async () => {
       const bs = Math.round(+$('s_bs').value);
       if (!(bs >= 1 && bs <= 500)) { setMsg('Batch size must be 1–500.'); return; }
@@ -975,11 +1336,22 @@
       const d1 = Math.max(0, +$('s_delay').value || 0), d2 = Math.max(0, +$('s_delay2').value || 0);
       s.delayMs = Math.min(d1, d2); s.delayMaxMs = Math.max(d1, d2);
       s.batchSize = bs;
-      s.outlet = $('s_outlet').value.trim(); s.user = $('s_user').value.trim(); s.ver = $('s_ver').value.trim();
+      s.outlet = $('s_outlet').value.trim(); s.ver = $('s_ver').value.trim();
+      if (!busy() || !s.pdfScrub.enabled) s.user = $('s_user').value.trim();
+      if (!busy()) readPdfBoxes();
       readFileBoxes();
       sDraft = {}; await saveSettings(); setMsg(`Settings saved. Batch size is now ${bs}.`);
     });
     const FK = ['docJson', 'histCsv', 'histJson', 'attCsv', 'manifest'];
+    const readPdfBoxes = () => {
+      s.pdfScrub.enabled = $('s_pdfEnabled').checked;
+      s.pdfScrub.user = $('s_pdfUser').checked;
+      s.pdfScrub.timestamp = $('s_pdfTimestamp').checked;
+      s.pdfScrub.strings = $('s_pdfStrings').value;
+    };
+    for (const id of ['s_pdfEnabled', 's_pdfUser', 's_pdfTimestamp']) on(id, 'onchange', async () => {
+      if (busy()) return; readPdfBoxes(); await saveSettings(); render();
+    });
     const readFileBoxes = () => { for (const k of FK) if ($('f_' + k)) s.files[k] = $('f_' + k).checked; };
     for (const k of FK) on('f_' + k, 'onchange', async () => { readFileBoxes(); await saveSettings(); render(); });
     const preset = async p => { Object.assign(s.files, p); await saveSettings(); setMsg('File selection saved.'); };
@@ -989,14 +1361,16 @@
     on('f_none', 'onclick', () => preset({ docJson: false, histCsv: false, histJson: false, attCsv: false, manifest: false }));
     on('s_check', 'onclick', () => { diag = checkSetup(); render(); });
     on('s_detect', 'onclick', async () => {
+      if (busy() && s.pdfScrub.enabled) return;
       detectSession(); await detectUserFallback();
       if (s.pageSizeSrc === 'manual') s.pageSizeSrc = 'default';
       notePageSize(+document.documentElement.dataset.tipsxPageSize);
       sDraft = {}; await saveSettings(); render();
     });
 
-    if (focusLi && $('li') && !$('li').disabled) { $('li').focus(); $('li').setSelectionRange(selA, selB); }
     if (showSettings) for (const id of S_FIELDS) { const el = $(id); if (!el) continue; if (id in sDraft) el.value = sDraft[id]; el.addEventListener('input', () => { sDraft[id] = el.value; }); }
+    // keep keyboard focus (and the caret) on the same control across re-renders, e.g. while a batch progresses
+    if (focusId && !focusOnOpen) { const el = $(focusId); if (el && !el.disabled) { el.focus(); try { if (typeof el.selectionStart === 'number') el.setSelectionRange(selA, selB); } catch (e) { } } }
     root.querySelector('.body').scrollTop = scroll;
     if (focusOnOpen) { const t = $('li') && !$('li').disabled ? $('li') : root.querySelector('.dr ' + FOCUSABLE.split(',').join(',.dr ')); if (t) t.focus(); }
     syncToolbar();
@@ -1062,6 +1436,74 @@
     }
     const st = document.querySelector('.tipsx-menuitem .tipsx-mi-st');
     if (st) { const t = menuStatus(); if (st.textContent !== t) st.textContent = t; }
+  }
+
+  // ---------------------------------------------------------------- "New in TIPS" popup
+  // Shown when the automatic check (whenever TIPS loads) finds new topics or new versions. A small dialog in the
+  // Reader's own look (same tokens/fonts as the drawer): what was found, and a button to prepare the batch.
+  const noteHost = document.createElement('div');
+  noteHost.style.cssText = host.style.cssText;
+  const nroot = noteHost.attachShadow({ mode: 'open' });
+  let noteOpen = false, noteReturn = null;
+  const NOTE_CSS = `
+  .nt{left:50%;top:var(--top,96px);transform:translateX(-50%);width:min(520px,calc(100vw - 32px));max-width:none;animation:tipsx-nt .15s ease-out}
+  @keyframes tipsx-nt{from{opacity:0;transform:translate(-50%,-8px)}}
+  .nt .phd{padding:14px 6px 6px 20px;align-items:flex-start} .nt .phd .ic{display:flex;color:var(--blue);margin-top:2px}
+  .nt h3{font-size:22px} .nt .pbd{padding:8px 20px 16px} .nt .pft{padding:12px 16px}
+  .nt .vl{max-height:min(320px,45vh)}
+  .nr{display:flex;flex-direction:column;gap:2px;padding:10px 4px;color:var(--tx);text-decoration:none;border-top:1px solid var(--div)} .nr:first-child{border-top:0}
+  .nr:hover{background:var(--soft)} .nr:focus-visible{outline:2px solid var(--blue);outline-offset:-2px}
+  .nr .l1{display:flex;align-items:baseline;gap:8px} .nr .dt{margin-left:auto;white-space:nowrap}
+  .tag.up{background:#fdf1e6;color:#8a4200} .nr .one{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}`;
+  const fmtDay = v => { const t = tsOf(v); return isNaN(t) ? '' : new Date(t).toLocaleDateString(); };
+  function closeNotice() {
+    if (!noteOpen) return;
+    noteOpen = false; nroot.innerHTML = '';
+    window.removeEventListener('keydown', noteKey, true);
+    if (noteReturn && noteReturn.isConnected && noteReturn.focus) noteReturn.focus();
+  }
+  function noteKey(e) {
+    if (!noteOpen) return;
+    if (e.key === 'Escape') { e.stopPropagation(); e.preventDefault(); closeNotice(); }
+    else if (e.key === 'Tab') {
+      const f = [...nroot.querySelectorAll(FOCUSABLE)], a = nroot.activeElement;
+      if (!f.length) return;
+      if (e.shiftKey && (a === f[0] || !a)) { e.preventDefault(); f.at(-1).focus(); }
+      else if (!e.shiftKey && (a === f.at(-1) || !a)) { e.preventDefault(); f[0].focus(); }
+    }
+  }
+  function showNotice(lc) {
+    const items = (lc && lc.items) || [];
+    if (!items.length || visible || pick) return;   // drawer open: its message already says what was found
+    if (!noteHost.isConnected) document.documentElement.appendChild(noteHost);
+    const nNew = items.filter(x => x.kind === 'new').length, nUp = items.length - nNew;
+    const what = [nNew && `${nNew} new topic${nNew > 1 ? 's' : ''}`, nUp && `${nUp} new version${nUp > 1 ? 's' : ''}`].filter(Boolean).join(' and ');
+    // Can the next batch take all of them? Then offer to prepare it straight away.
+    const nextIds = new Set(pendingItems().slice(0, S.settings.batchSize).map(x => String(x.tipsId)));
+    const inNext = items.every(x => nextIds.has(String(x.tipsId)));
+    const nb = nextBatch(), k = Math.min(S.settings.batchSize, pendingItems().length);
+    const row = x => `<a class="nr" href="/tips-reader/search/topics/${encodeURIComponent(x.tipsId)}/${encodeURIComponent(x.version)}" title="Open ${esc(x.tips)} in TIPS">
+        <span class="l1"><b>${esc(x.tips)}</b>${x.kind === 'new' ? '<span class="tag">New</span>' : `<span class="tag up">v${esc(x.prev)} → v${esc(x.version)}</span>`}<span class="mut sm dt">${esc(fmtDay(x.mdate))}</span></span>
+        <span class="one">${esc(x.title)}</span>${x.kind === 'update' ? `<span class="mut sm">${x.exported ? `You exported v${esc(x.prev)} – v${esc(x.version)} is queued again` : 'Not exported yet'}</span>` : ''}</a>`;
+    nroot.innerHTML = `<style>${css}${NOTE_CSS}</style><div class="dim" id="n_dim" style="top:${topOffset()}px"></div>
+      <div class="pk nt" role="dialog" aria-modal="true" aria-labelledby="n_t" style="--top:${topOffset() + 40}px">
+        <div class="phd"><span class="ic">${svg('<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"></path><path d="M14 3v5h5"></path><path d="M12 12v6"></path><path d="M9 15h6"></path>', 24, 1.6)}</span>
+          <div class="bd"><h3 id="n_t">New in TIPS</h3><span class="mut sm">${what} since your last export · found when TIPS loaded at ${esc(new Date(lc.at).toTimeString().slice(0, 5))}</span></div>
+          <button class="ib" id="n_x" aria-label="Close">${svg('<path d="M18 6L6 18"></path><path d="M6 6l12 12"></path>', 20, 1.5)}</button></div>
+        <div class="pbd"><div class="vl" role="list">${items.map(row).join('')}</div>
+          <span class="mut sm">${items.length === 1 ? 'It is' : 'They are'} queued for Bulk export. Click a topic to open it in TIPS.</span></div>
+        <div class="pft"><button class="b bar" id="n_later">Later</button>
+          <button class="b pri" id="n_go">${I.dl}${inNext && nb ? `Prepare ${k} document${k === 1 ? '' : 's'}` : 'Open Bulk export'}</button></div></div>`;
+    const $ = id => nroot.getElementById(id);
+    $('n_x').onclick = $('n_later').onclick = $('n_dim').onclick = closeNotice;
+    for (const a of nroot.querySelectorAll('.nr')) a.addEventListener('click', closeNotice);
+    $('n_go').onclick = () => {
+      closeNotice(); view = 'bulk'; showSettings = false; openDrawer(true);
+      if (inNext && nb && !busy()) prepareBatch().catch(e => setMsg((e instanceof SessionError ? '⚠ ' : 'Error: ') + e.message));
+    };
+    if (!noteOpen) { noteReturn = document.activeElement; window.addEventListener('keydown', noteKey, true); }
+    noteOpen = true;
+    $('n_go').focus();
   }
 
   // ---------------------------------------------------------------- TIPS topic toolbar: "download this topic" button
@@ -1248,9 +1690,11 @@
     try {
       await downloadFound();
       if (S.single && S.single.phase === 'done') { flash('done', 5000); if (keep) { S.single = keep.single; liText = keep.liText; } }
-      else flash('error', 6000);
-    } catch (e) { flash('error', 6000); setMsg((e instanceof SessionError ? '⚠ ' : 'Error: ') + e.message); }
+      else { flash('error', 6000); restoreList(); }
+    } catch (e) { flash('error', 6000); restoreList(); setMsg((e instanceof SessionError ? '⚠ ' : 'Error: ') + e.message); }
     render();
+    // cancelled / failed / interrupted: give the Single LI tab back the list the user had looked up (or clear it)
+    function restoreList() { if (S.single && S.single.phase === 'looked') { S.single = keep ? keep.single : null; if (keep) liText = keep.liText; } }
   }
   // Row download picker: a small TIPS-styled popup under the row's icon listing every version of the topic
   // (newest first, with its date and change reason; the current one ticked) and whether to include attachments. Resolves with the
@@ -1354,19 +1798,50 @@
   }
   let injectQueued = false;
   new MutationObserver(muts => {
-    if (injectQueued || muts.every(m => m.target.closest && m.target.closest('.tipsx-dlwrap, .tipsx-rbadge, .tipsx-menuitem, .tipsx-row'))) return;   // ignore our own updates
+    if (injectQueued || muts.every(m => m.target.closest && m.target.closest('.tipsx-dlwrap, .tipsx-rbadge, .tipsx-menuitem, .tipsx-row, .tipsx-chkwrap'))) return;   // ignore our own updates
     injectQueued = true; requestAnimationFrame(injectToolbar);
   }).observe(document.documentElement, { childList: true, subtree: true });
 
-  window.addEventListener('beforeunload', e => { if (S.run || S.pending || S.resume) { e.preventDefault(); e.returnValue = ''; } });
+  // A running download would be lost; a batch awaiting approval / an interrupted download is kept (once written).
+  window.addEventListener('beforeunload', e => { if (S.run || S.approving || S.importing || persisting) { e.preventDefault(); e.returnValue = ''; } });
   if (hasChrome && chrome.runtime && chrome.runtime.onMessage) {
-    chrome.runtime.onMessage.addListener((m, _s, reply) => { if (m && m.type === 'toggle') openDrawer(!visible); reply && reply(true); });
+    chrome.runtime.onMessage.addListener((m, _s, reply) => {
+      if (m?.type === 'index-folder-lock') {
+        if (busy() || S.checking || persisting || S.single?.phase === 'looking') { reply({ locked: false }); return; }
+        S.folderLock = m.token; render(); reply({ locked: true }); return;
+      }
+      if (m?.type === 'index-folder-unlock') {
+        if (S.folderLock !== m.token) { reply(true); return; }
+        reloadProgress().then(() => { S.folderLock = null; render(); reply(true); }, () => { S.folderLock = null; reply(false); });
+        return true;
+      }
+      if (m && m.type === 'toggle') openDrawer(!visible);
+      reply && reply(true);
+    });
+    if (chrome.storage.onChanged) chrome.storage.onChanged.addListener((changes, area) => {
+      if (area !== 'local') return;
+      if (changes.indexFolder) S.folder = changes.indexFolder.newValue || { configured: false, epoch: null };
+      if (loaded && !busy() && !S.checking && (changes.index || changes.done)) reloadProgress().then(render);
+      else if (loaded && changes.indexFolder) render();
+    });
   }
 
-  if (!hasChrome) window.__TIPSX_DEBUG = { S, importLog, prepareBatch, approve, discard, render, progressCsv, nextBatch, lookupSpecific, downloadFound, downloadOpenTopic };
+  if (!hasChrome) window.__TIPSX_DEBUG = { S, importLog, refreshIndex, showNotice, prepareBatch, approve, discard, render, progressCsv, nextBatch, lookupSpecific, downloadFound, downloadOpenTopic };
 
   document.documentElement.appendChild(host);
-  load().then(async () => { if (!S.settings.user) await detectUserFallback(); await saveSettings(); render(); });
+  load().then(async () => { await restoreKept(); if (!S.settings.user) await detectUserFallback(); await saveSettings(); render(); autoCheckOnLoad(); });
+  // Every time TIPS is opened, reloaded or refreshed (this script runs once per page load): quick "Check new" once the
+  // session is known. One search request in the usual case; silent unless something new or updated turns up, which
+  // opens the "New in TIPS" popup.
+  async function autoCheckOnLoad() {
+    if (!S.settings.autoCheck || !S.index.length) return;
+    for (let i = 0; i < 30 && !sessionOK(); i++) { await sleep(1000); detectSession(); }
+    if (!sessionOK()) return;
+    await sleep(1500);   // let the Reader's own first requests go first
+    if (busy()) return;
+    try { const r = await refreshIndex(false, true); if (r && r.items && r.items.length && !busy()) showNotice(r); }
+    catch (e) { console.warn('TIPS Exporter: check when TIPS loaded failed –', e.message); }
+  }
   // Late detection: the Reader fires its first API calls after load
   setTimeout(() => { if (!sessionOK()) { detectSession(); saveSettings(); render(); } }, 5000);
 })();

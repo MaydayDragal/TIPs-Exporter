@@ -17,7 +17,9 @@ function makeEnv(extra = {}, path = '/tips-reader/search/topics') {
   w.chrome = { storage: { local: { get: async k => ({ [k]: st[k] }), set: async o => Object.assign(st, o) } },
     runtime: { getManifest: () => ({ version: '1.6.1' }), onMessage: { addListener(fn) { w.__toggle = fn; } } } };
   w.confirm = () => true; w.fetch = fakeFetch;
-  w.eval(probe); w.eval(content);
+  // These legacy endpoint fixtures use zero-filled dummy PDFs; real scrubbing is covered by pdf-scrub.test.js.
+  st.settings = { pdfScrub: { enabled: false }, ...st.settings };
+  w.eval(probe); w.eval(fs.readFileSync(require('path').join(__dirname, '..', 'index-csv.js'), 'utf8')); w.eval(content);
   const root = () => [...w.document.documentElement.children].find(e => e.shadowRoot).shadowRoot;
   return { w, st, root, $: id => root().getElementById(id) };
 }
