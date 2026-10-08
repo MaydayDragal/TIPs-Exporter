@@ -10,7 +10,7 @@
     writeStatus: s => chrome.storage.local.set({ indexFolder: s })
   });
   // A source switch must not take place underneath a running/prepared/interrupted export.
-  async function withIdleTabs(fn) {
+  async function withIdleTabs(fn, label = 'index folder') {
     const locked = [], token = crypto.randomUUID();
     try {
       const tabs = await chrome.tabs.query({ url: 'https://xentry.mercedes-benz.com/tips-reader/*' });
@@ -18,7 +18,7 @@
         let result;
         try { result = await chrome.tabs.sendMessage(tab.id, { type: 'index-folder-lock', token }); }
         catch (_) { continue; } // tab has no exporter content script yet
-        if (!result || result.locked !== true) throw Error('Finish or discard the current export/check before changing or reloading the index folder. Reload older TIPS tabs after updating the extension.');
+        if (!result || result.locked !== true) throw Error(`Finish or discard the current export/check before changing or reloading the ${label}. Reload older TIPS tabs after updating the extension.`);
         locked.push(tab.id);
       }
       return await fn();
@@ -26,6 +26,7 @@
       await Promise.allSettled(locked.map(id => chrome.tabs.sendMessage(id, { type: 'index-folder-unlock', token })));
     }
   }
+  globalThis.TIPSWithIdleTabs = withIdleTabs;
   chrome.runtime.onMessage.addListener((m, sender, reply) => {
     if (!m || m.type !== 'index-folder') return;
     const own = sender?.id === chrome.runtime.id;
