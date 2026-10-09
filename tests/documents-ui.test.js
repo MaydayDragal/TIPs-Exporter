@@ -137,12 +137,13 @@ async function update(c, e) { c.$('doc_update').click(); await until(() => e.mes
       assert.equal(await e.d.read(`${TOPIC}/${LI}_v4.pdf`), pdf(4));
     } finally { c.close(); }
   });
-  await test('failed PDF scrubbing leaves existing files intact and reports missing latest coverage', async () => {
+  await test('failed PDF scrubbing leaves existing files intact and records excluded latest coverage', async () => {
     const e = await connected(); e.state.settings.pdfScrub = { enabled: true }; const c = await content(e);
     try {
       await update(c, e); await assert.rejects(e.d.read(`${TOPIC}/${LI}_v5.pdf`), /NotFound/);
       assert.equal(await e.d.read(`${TOPIC}/${LI}_v4.pdf`), pdf(4)); assert.match(c.$('doc_status').textContent, /scrub failed/);
-      assert.equal((await e.db.get('documentsConnection')).progress[LI].ok, false); assert.match(c.$('doc_inventory').textContent, /missing v5/);
+      assert.equal((await e.db.get('documentsConnection')).progress[LI].ok, true); assert(!c.$('doc_inventory').textContent.includes('missing v5'));
+      assert.match(c.$('doc_exceptions').textContent, /v5.*scrub_failed/);
     } finally { c.close(); }
   });
   await test('failed attachment close after an earlier success is retried automatically with the same version and date', async () => {
@@ -152,9 +153,11 @@ async function update(c, e) { c.$('doc_update').click(); await until(() => e.mes
       const folder = await (await e.d.getDirectoryHandle('Batch 001')).getDirectoryHandle(`${LI} - Old title (Requested)`);
       await (await folder.getDirectoryHandle('Attachments and Links')).removeEntry('photo (v5).jpg');
       await update(c, e); assert.equal((await e.db.get('documentsConnection')).progress[LI].ok, false);
+      assert(e.state.index[0].exceptions.some(x => x.kind === 'retryable' && /NoModificationAllowedError/.test(x.reason)));
       e.d.state.failClose = false; e.messages.length = 0; c.$('refresh').click(); await until(() => e.messages.some(m => m.action === 'end')); await until(() => !c.$('doc_update').disabled);
       assert.equal(await e.d.read(`${TOPIC}/Attachments and Links/photo (v5).jpg`), 'revision after success');
       assert.equal((await e.db.get('documentsConnection')).progress[LI].ok, true);
+      assert.equal(e.state.index[0].exceptions, undefined);
     } finally { c.close(); }
   });
   await test('Stop after an earlier success persists a retry marker before network work finishes', async () => {

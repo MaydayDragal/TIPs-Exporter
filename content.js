@@ -348,7 +348,11 @@
     try {
       setMsg('Building index…');
       ({ list, total, short } = await fetchAllTopics());
-      S.index = list.sort((a, b) => a.tips.localeCompare(b.tips));
+      const previous = new Map(S.index.map(x => [x.tips.toUpperCase() + ':' + String(x.tipsId), x]));
+      S.index = list.sort((a, b) => a.tips.localeCompare(b.tips)).map(x => {
+        const old = previous.get(x.tips.toUpperCase() + ':' + String(x.tipsId));
+        return { ...x, ...(old?.exceptions ? { exceptions: old.exceptions } : {}), ...(old?.attachmentInventory ? { attachmentInventory: old.attachmentInventory } : {}) };
+      });
       await saveIndex();
     } finally { S.checking = false; }
     setMsg(`Index built: ${S.index.length} unique topics (${total} search hits), ${remainingBatches()} batches to go at ${S.settings.batchSize} per batch.` + short);
@@ -474,14 +478,38 @@
     if (r.status) S.documents = r.status;
     return r;
   }
+  async function syncDocumentsIndex({ exceptionEvents = [], attachmentUpdates = [] } = {}) {
+    const csv = window.TIPSIndexCsv, events = csv.applyExceptionEvents(S.index, exceptionEvents);
+    const attachments = csv.applyAttachmentInventories(events.index, attachmentUpdates);
+    if (events.changed || attachments.changed) {
+      const previous = S.index;
+      S.index = attachments.index;
+      // The guarded save commits Chrome first and retains pending disk synchronization.
+      // A stale-tab rejection throws: its journal must remain unacknowledged.
+      try { await saveIndex(); }
+      catch (e) {
+        // A non-stale rejection leaves this tentative copy in memory. Restore it
+        // so a later scan cannot mistake unsaved events for acknowledged progress.
+        // Stale saves already reload the newer persisted index; keep that copy.
+        if (S.index === attachments.index) S.index = previous;
+        throw e;
+      }
+    }
+    if (events.ids.length) await documentsRequest('ack-exceptions', { ids: events.ids });
+  }
+  async function acceptDocumentInventory(inventory) {
+    await syncDocumentsIndex(inventory);
+    inventory.summary.indexedAttachments = S.index.reduce((n,x) => n + (x.attachmentInventory?.files.length || 0), 0);
+    S.documentInventory = inventory;
+  }
   async function scanDocuments() {
     if (busy() || S.checking || S.single?.phase === 'looking') return;
     S.documentRun = { token: crypto.randomUUID(), scan: true, label: 'Scanning saved documents…' }; S.documentResult = ''; render();
-    try { S.documentInventory = (await documentsRequest('inventory', { snapshot: documentsSnapshot() })).inventory; }
+    try { await acceptDocumentInventory((await documentsRequest('inventory', { snapshot: documentsSnapshot() })).inventory); }
     catch (e) { S.documentInventory = null; S.documentResult = e.message; }
     finally { S.documentRun = null; render(); }
   }
-  async function updateDocuments({ auto = false } = {}) {
+  async function updateDocuments({ auto = false, retryExceptions = false } = {}) {
     if (busy() || S.checking || S.single?.phase === 'looking' || !S.documents.configured) return;
     if (!sessionOK()) { S.documentResult = 'Open a TIPS topic to detect your session, then update again.'; render(); return; }
     const client = window.TIPSDocumentsClient;
@@ -490,49 +518,63 @@
     // The owner must answer recovery probes even before start returns its lease.
     S.documentRun = run; S.documentResult = ''; render();
     const policy = pdfScrubPolicy(), policyKey = JSON.stringify(policy), summary = { topics: 0, pdfs: 0, attachments: 0, skipped: 0, skippedTopics: 0, errors: [] };
-    let started = false;
+    let started = false, active = null;
     const check = () => { if (run.cancel) throw Error('Folder update stopped.'); };
     try {
-      const planned = await documentsRequest('start', { token: run.token, snapshot: documentsSnapshot(), options: { auto, includeMissing: !auto && S.documentsIncludeMissing } });
-      started = true; S.documentInventory = planned.inventory;
+      const planned = await documentsRequest('start', { token: run.token, snapshot: documentsSnapshot(), options: { auto, retryExceptions, includeMissing: !auto && (S.documentsIncludeMissing || retryExceptions) } });
+      started = true; await acceptDocumentInventory(planned.inventory);
       const indexed = new Map(S.index.map(x => [x.tips.toUpperCase(), x]));
       const eligible = planned.topics.filter(t => indexed.has(t.tips));
-      const topics = eligible.filter(t => client.needsUpdate(t, indexed.get(t.tips)));
+      const topics = eligible.filter(t => retryExceptions ? client.excludedVersions(indexed.get(t.tips)).some(v => v <= +indexed.get(t.tips).version) : client.needsUpdate(t, indexed.get(t.tips)));
       summary.skippedTopics = eligible.length - topics.length;
       run.total = topics.length;
       for (const topic of topics) {
         check(); run.i++; run.label = `${topic.tips} · ${run.i}/${run.total} selected for update`; render();
+        const item = { ...indexed.get(topic.tips), tips: topic.tips }, files = [], errors = [];
+        const excluded = client.excludedVersions(item);
+        active = { tips: topic.tips, version: +item.version, mdate: item.mdate, policy: policyKey, ok: false, retryOnly: retryExceptions, exceptions: [], resolvedVersions: [], unavailable: (item.exceptions || []).filter(x => x.kind === 'unavailable').map(x => x.version) };
         // Persist retry intent before fetching, scrubbing or writing can fail/stop.
         await documentsRequest('topic-start', { token: run.token, tips: topic.tips });
-        const item = { ...indexed.get(topic.tips), tips: topic.tips }; check();
-        const files = [], errors = [];
-        item.opts = { documentFolder: true, existingVersions: [...topic.versions, ...(topic.last?.unavailable || [])], att: client.needsAttachments(topic, item) };
-        let stats;
+        item.opts = { documentFolder: true, existingVersions: [...topic.versions, ...excluded],
+          retryVersions: retryExceptions ? excluded.filter(v => v <= +item.version) : null, att: !retryExceptions && client.needsAttachments(topic, item) };
+        let stop = null;
         try {
-          stats = await exportDoc(item, files, errors, label => { check(); run.label = `${topic.tips} · ${run.i}/${run.total} selected · ${label}`; render(); }, policy);
+          const stats = await exportDoc(item, files, errors, label => { check(); run.label = `${topic.tips} · ${run.i}/${run.total} selected · ${label}`; render(); }, policy);
+          active.version = +stats.version;
+          const classified = client.classifyErrors({ ...item, version: stats.version }, errors);
+          active.exceptions = classified.exceptions;
+          check();
+          for (const file of files) {
+            check(); const path = file.name.slice(file.name.indexOf('/') + 1);
+            run.label = `${topic.tips} · saving ${path}`; render();
+            const saved = await client.write(documentsRequest, run.token, topic.tips, stats.version, { path, data: file.data }, () => run.cancel);
+            if (saved.skip) summary.skipped++; else if (saved.kind === 'pdf') summary.pdfs++; else summary.attachments++;
+            if (saved.kind === 'pdf') active.resolvedVersions.push(+/_v(\d+)\.pdf$/i.exec(path)[1]);
+          }
+          const accounted = topic.versions.includes(+stats.version) || active.resolvedVersions.includes(+stats.version) || excluded.includes(+stats.version) || active.exceptions.some(x => x.version === +stats.version);
+          if (!retryExceptions && !accounted && !classified.remaining.length) classified.remaining.push(`${topic.tips}: latest PDF was not saved.`);
+          active.failure = classified.remaining.join('; ');
+          active.ok = !active.failure;
         } catch (e) {
-          if (run.cancel || e instanceof SessionError) throw e;
-          summary.errors.push(`${topic.tips}: ${e.message}`);
-          await documentsRequest('topic-done', { token: run.token, result: { tips: topic.tips, version: item.version, mdate: item.mdate, policy: policyKey, ok: false, unavailable: topic.last?.unavailable || [] } });
-          continue;
+          active.exceptions = client.classifyErrors(item, errors).exceptions;
+          active.failure = `${topic.tips}: ${e.message}`; errors.push(active.failure);
+          if (run.cancel || e instanceof SessionError) stop = e;
         }
-        check();
-        for (const file of files) {
-          check(); const path = file.name.slice(file.name.indexOf('/') + 1);
-          run.label = `${topic.tips} · saving ${path}`; render();
-          const saved = await client.write(documentsRequest, run.token, topic.tips, stats.version, { path, data: file.data }, () => run.cancel);
-          if (saved.skip) summary.skipped++; else if (saved.kind === 'pdf') summary.pdfs++; else summary.attachments++;
-        }
-        const unavailable = [...new Set([...(topic.last?.unavailable || []), ...errors.map(e => /: v(\d+) (?:not available in TIPS|PDF HTTP 404)/.exec(e)).filter(Boolean).map(m => +m[1])])];
-        const hard = errors.filter(e => !/: v\d+ (?:not available in TIPS|PDF HTTP 404)/.test(e));
-        const currentSaved = topic.versions.includes(+stats.version) || files.some(f => f.name.endsWith(`/${item.tips}_v${stats.version}.pdf`));
-        if (!currentSaved && !hard.length) hard.push(`${topic.tips}: latest PDF was not saved.`);
-        summary.errors.push(...errors); if (!currentSaved && !errors.length) summary.errors.push(...hard);
-        await documentsRequest('topic-done', { token: run.token, result: { tips: topic.tips, version: stats.version, mdate: item.mdate, policy: policyKey, ok: !hard.length, unavailable } });
+        active.unavailable = [...new Set([...active.unavailable, ...active.exceptions.filter(x => x.kind === 'unavailable').map(x => x.version)])].filter(v => !active.resolvedVersions.includes(v));
+        summary.errors.push(...errors); if (active.failure && !errors.length) summary.errors.push(active.failure);
+        const committed = await documentsRequest('topic-done', { token: run.token, result: active }); active = null;
+        await syncDocumentsIndex(committed);
         summary.topics++;
+        if (stop) throw stop;
         if (run.i < run.total) { const until = Date.now() + randDelay(); while (Date.now() < until) { check(); await sleep(Math.min(250, until - Date.now())); } }
       }
-    } catch (e) { if (!run.cancel) summary.errors.push(e.message || String(e)); }
+    } catch (e) {
+      if (!run.cancel) summary.errors.push(e.message || String(e));
+      if (active) {
+        try { await syncDocumentsIndex(await documentsRequest('topic-done', { token: run.token, result: { ...active, ok: false, failure: e.message || String(e) } })); }
+        catch (failure) { summary.errors.push('Could not record this document error: ' + failure.message); }
+      }
+    }
     finally {
       summary.cancelled = run.cancel;
       if (started) {
@@ -543,7 +585,7 @@
       if (summary.skippedTopics) S.documentResult += ` ${summary.skippedTopics} unchanged document(s) skipped without TIPS requests.`;
       if (summary.errors.length) S.documentResult += ` ${summary.errors.length} issue(s):\n` + summary.errors.slice(0, 100).join('\n');
       if (started) {
-        try { S.documentInventory = (await documentsRequest('inventory', { snapshot: documentsSnapshot() })).inventory; }
+        try { await acceptDocumentInventory((await documentsRequest('inventory', { snapshot: documentsSnapshot() })).inventory); }
         catch (e) { S.documentInventory = null; S.documentResult += '\nVerification could not finish: ' + e.message; }
       }
       S.documentRun = null; render();
@@ -653,13 +695,18 @@
   async function exportDoc(item, files, errors, step, policy = pdfScrubPolicy()) {
     const base = `${topicName(item)} (Requested)`, o = item.opts || null;
     step('topic data', { g: 'data' });
-    let doc = o && o.doc;
+    let doc = o && o.doc, unavailableVersion = 0;
     if (!doc) {
       const jr = await get(`/tips/topic-service/api/v1/topics/${item.tipsId}/${item.version}?${Q()}`, 'application/json');
-      if (!jr.ok) throw new Error('topic data HTTP ' + jr.status);
-      doc = await jr.json();
+      if (jr.ok) doc = await jr.json();
+      else if (jr.status === 404 && o?.documentFolder && o.retryVersions?.includes(+item.version) && !o.att) {
+        // An explicit retry confirmed this already-excluded version is still gone.
+        // Other selected historical PDFs can be retried directly without this metadata.
+        unavailableVersion = +item.version; doc = { version: unavailableVersion };
+        errors.push(`${item.tips}: v${unavailableVersion} not available in TIPS`);
+      } else throw new Error('topic data HTTP ' + jr.status);
     }
-    const v = doc.version || item.version, want = n => !o || (o.documentFolder ? !o.existingVersions.includes(n) : o.versions.includes(n));
+    const v = doc.version || item.version, want = n => n !== unavailableVersion && (!o || (o.documentFolder ? o.retryVersions ? o.retryVersions.includes(n) : !o.existingVersions.includes(n) : o.versions.includes(n)));
     let transient = 0;   // files that failed for a temporary reason (server/network) – the document is retried later
     const failed = e => { if (e instanceof SessionError) throw e; if (e instanceof TransientError || (e && e.name === 'TypeError') || e.transient) transient++; };
     const F = o?.documentFolder ? {} : S.settings.files;
@@ -670,7 +717,7 @@
       step(`PDF v${v}`, { g: 'pdf', v });
       const pr = await get(`/tips/topic-service/api/v1/file/topics/${item.tipsId}/${v}?${Q()}`, 'application/pdf');
       if (pr.ok) await addDownload(files, errors, stats, `${base}/${safe(item.tips)}_v${v}.pdf`, pr, policy);
-      else errors.push(`${item.tips}: current PDF HTTP ${pr.status}`);
+      else errors.push(`${item.tips}: ${o?.documentFolder ? 'v' + v : 'current'} PDF HTTP ${pr.status}`);
     }
 
     const atts = doc.attachments || [], refs = doc.references || [];
@@ -1241,24 +1288,34 @@
   function vDocuments() {
     const s = S.documents, run = S.documentRun, a = S.documentInventory;
     const disabled = busy() || S.checking || S.single?.phase === 'looking' || !s.configured;
+    const exceptions = S.index.flatMap(x => (x.exceptions || []).map(e => ({ tips: x.tips, ...e })));
+    const excluded = exceptions.filter(x => x.kind !== 'retryable'), retryable = exceptions.length - excluded.length;
     let report = '';
     if (a) {
-      const n = a.summary, problems = a.rows.filter(r => r.folderStatus !== 'present');
-      report = `<div id="doc_inventory" class="sec"><b>${n.found} of ${n.indexed} indexed documents found · ${n.complete} complete for indexed PDF versions</b>
+      const n = a.summary, problems = a.rows.filter(r => !['present', 'excluded'].includes(r.folderStatus));
+      report = `<div id="doc_inventory" class="sec"><b>${n.complete} of ${n.requiredDocuments} required documents complete · ${n.requiredVersions} required PDF versions</b>
+        <span class="mut sm">Catalogue: ${n.indexed} documents · ${n.found} folders found · ${n.excludedVersions} excluded PDF versions across ${n.excludedDocuments} documents (${n.fullyExcludedDocuments} wholly excluded). ${n.indexedAttachments} attachments indexed locally.</span>
         <span class="mut sm">Missing folders: ${n.missingExported} marked exported, ${n.pendingNotSaved} pending in log. Version gaps in saved folders: ${n.versionGaps}. Invalid PDFs: ${n.invalidPdfs}. Duplicate document folders: ${n.duplicateTopics}. Ambiguous locations: ${n.ambiguousTopics || 0}. Documents outside index: ${n.extraTopics}. Missing tracked attachments: ${n.missingAttachments}.</span>
         <span class="mut sm">${esc(a.attachmentNote)} PDF checks cover filenames, versions and headers, not every page.</span>
-        ${problems.length || a.issues.length ? `<details><summary>Discrepancies (${problems.length + a.issues.length})</summary><pre>${esc([...a.issues, ...problems.slice(0, 100).map(r => `${r.tips}: ${r.folderStatus}; log ${r.indexStatus}${r.missing.length ? '; missing v' + r.missing.slice(0, 30).join(', v') : ''}${r.invalid.length ? '; invalid v' + r.invalid.join(', v') : ''}${r.missingAttachments.length ? '; missing attachments: ' + r.missingAttachments.join(', ') : ''}${r.notes.length ? '; ' + r.notes.join('; ') : ''}\n${r.path || '(no folder)'}`)].join('\n'))}</pre>${problems.length > 100 ? '<span class="mut sm">First 100 shown. Download the full inventory CSV for every document.</span>' : ''}</details>` : '<span class="okc">All indexed PDF versions found. See the attachment note above.</span>'}
+        ${problems.length || a.issues.length ? `<details><summary>Discrepancies (${problems.length + a.issues.length})</summary><pre>${esc([...a.issues, ...problems.slice(0, 100).map(r => `${r.tips}: ${r.folderStatus}; log ${r.indexStatus}${r.missing.length ? '; missing v' + r.missing.slice(0, 30).join(', v') : ''}${r.invalid.length ? '; invalid v' + r.invalid.join(', v') : ''}${r.missingAttachments.length ? '; missing attachments: ' + r.missingAttachments.join(', ') : ''}${r.notes.length ? '; ' + r.notes.join('; ') : ''}\n${r.path || '(no folder)'}`)].join('\n'))}</pre>${problems.length > 100 ? '<span class="mut sm">First 100 shown. Download the full inventory CSV for every document.</span>' : ''}</details>` : '<span class="okc">All required PDF versions found; excluded versions are listed below. See the attachment note above.</span>'}
         <button class="b bar sm" id="doc_report">Download inventory CSV</button></div>`;
     }
     return `<div class="sec" style="border-top:1px solid var(--div);padding-top:16px"><h3>Saved documents</h3>
       <span class="mut">${esc(s.configured ? s.folderName + ' / [document folder] / ' + s.attachmentFolder : 'Choose your documents folder in Settings to inventory and update saved LI/GI documents.')}</span>
       <span class="mut sm">${s.configured && s.auto ? 'Automatic updates after Check new are on. ' : ''}Older PDFs and attachments are kept. Changed attachments get versioned names.</span>
       <span class="mut sm">Updates request only indexed changes and missing files. Complete, unchanged documents are skipped. Use Check new to refresh the index first.</span>
+      <span class="mut sm">Scan &amp; verify inventories local attachments into the main index log without TIPS requests.</span>
       <div class="grid2"><button class="b bar" id="doc_scan" ${disabled ? 'disabled' : ''}>Scan &amp; verify</button><button class="b pri" id="doc_update" ${disabled ? 'disabled' : ''}>Update saved documents</button></div>
       <label class="ck"><input type="checkbox" id="doc_missing" ${S.documentsIncludeMissing ? 'checked' : ''} ${disabled ? 'disabled' : ''}> Include missing documents from index in a manual update</label>
       <button class="b bar sm" id="doc_folder" ${busy() || S.checking ? 'disabled' : ''}>Choose / change documents folder…</button>
       ${run ? `<span role="status">${esc(run.label)}</span>${!run.scan ? `<button class="b dan" id="doc_stop" ${run.cancel ? 'disabled' : ''}>${run.cancel ? 'Stopping…' : 'Stop folder update'}</button>` : ''}` : ''}
-      <pre class="sm" id="doc_status" role="status" style="white-space:pre-wrap">${esc(S.documentResult || s.message || '')}</pre>${report}</div>`;
+      <pre class="sm" id="doc_status" role="status" style="white-space:pre-wrap">${esc(S.documentResult || s.message || '')}</pre>${report}
+      <details id="doc_exceptions"><summary>Index errors and exceptions (${exceptions.length})</summary>
+        <span class="mut sm">${excluded.length} excluded PDF versions · ${retryable} retryable document errors. Confirmed unavailable or unreadable versions are omitted from required coverage and routine requests. Temporary failures remain actionable.</span>
+        ${exceptions.length ? `<pre style="white-space:pre-wrap">${esc(exceptions.slice(0,100).map(x => `${x.tips} v${x.version} · ${x.kind}\n${x.reason}\n${x.at}`).join('\n\n'))}</pre>${exceptions.length > 100 ? '<span class="mut sm">First 100 shown. Save the main log or inventory CSV for the full list.</span>' : ''}` : '<span class="mut sm">No recorded document errors.</span>'}
+        <button class="b bar sm" id="doc_retry" ${disabled || !excluded.length ? 'disabled' : ''}>Retry excluded versions</button>
+        <span class="mut sm">Retries only excluded PDFs, including in missing document folders. Attachments are not requested. Successful saves clear the matching exceptions.</span>
+      </details></div>`;
   }
   function vBulk() {
     const s = S.settings, run = S.run && S.run.kind === 'bulk' ? S.run : null, pen = S.pending, dc = doneCount(), nb = nextBatch(), pendN = pendingItems().length;
@@ -1457,6 +1514,7 @@
     on('exp', 'onclick', () => saveBlob(new Blob([progressCsv()], { type: 'text/csv' }), `TIPS_progress_log_${new Date().toISOString().slice(0, 10)}.csv`));
     on('doc_scan', 'onclick', safeRun(scanDocuments));
     on('doc_update', 'onclick', safeRun(() => updateDocuments()));
+    on('doc_retry', 'onclick', safeRun(() => updateDocuments({ retryExceptions: true })));
     on('doc_missing', 'onchange', e => { S.documentsIncludeMissing = e.target.checked; });
     on('doc_stop', 'onclick', () => { if (S.documentRun) { S.documentRun.cancel = true; render(); } });
     on('doc_report', 'onclick', () => { if (S.documentInventory) saveBlob(new Blob([window.TIPSDocumentsClient.csv(S.documentInventory)], { type: 'text/csv' }), `TIPS_folder_inventory_${new Date().toISOString().slice(0, 10)}.csv`); });
