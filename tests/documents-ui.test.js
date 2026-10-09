@@ -7,6 +7,27 @@ const { LI, TOPIC, ITEM, pdf, tick, until, worker, connected, content, directory
 async function test(name, fn) { try { await fn(); console.log('PASS ' + name); } catch (e) { console.log('FAIL ' + name + ': ' + e.stack); process.exitCode = 1; } }
 async function update(c, e) { c.$('doc_update').click(); await until(() => e.messages.some(m => m.action === 'end'), 'folder update'); await until(() => !c.$('doc_update').disabled, 'update idle'); }
 (async () => {
+  await test('the screenshot GI archive scans and updates through the real content-to-worker flow', async () => {
+    const e = worker(), d = directory('Sorted - Stripped'), gi = 'GI72.12-P-053999', folder = `${gi} - Repair paint blistering on inside of 2nd left`;
+    e.d = d; e.state.index = [{ tips: gi, tipsId: 102, version: 12, title: 'Repair paint', mdate: '2026-10-09' }]; e.state.done = { 102: { b: 1, v: 12 } };
+    for (let v = 1; v <= 11; v++) await d.put(`${folder}/${gi}_v${v}.pdf`, pdf(v));
+    await d.put(`${folder}/Attachments and Links/photo.jpg`, 'old photo');
+    await e.db.put('documents-candidate:gi', { handle: d }); assert((await e.send('connect', { token: 'gi', options: { auto: false } }, 'options')).ok);
+    const c = await content(e, async (u, options, h) => {
+      if (options?.method === 'POST') return h.json({ hits: [{ ...e.state.index[0], modificationDate: '2026-10-09' }], totalHits: 1 });
+      if (u.includes('/file/topics/102/')) return h.binary(pdf(+u.match(/\/102\/(\d+)/)[1]));
+      if (u.includes('/topics/102/')) return h.json({ version: 12, attachments: [{ filename: 'photo.jpg', dataUrl: 'https://attachments.test/?readKey=one' }], references: [], history: { children: [] } });
+    });
+    try {
+      c.$('doc_scan').click(); await until(() => !c.$('doc_scan').disabled);
+      assert(c.$('doc_report'), c.$('doc_status').textContent); assert.match(c.$('doc_inventory').textContent, /GI72\.12-P-053999.*missing v12/);
+      c.$('doc_report').click(); assert.match(await c.downloads[0].text(), /GI72\.12-P-053999/);
+      await update(c, e); assert.equal(await d.read(`${folder}/${gi}_v12.pdf`), pdf(12));
+      for (let v = 1; v <= 11; v++) assert.equal(await d.read(`${folder}/${gi}_v${v}.pdf`), pdf(v));
+      assert.equal(await d.read(`${folder}/Attachments and Links/photo.jpg`), 'old photo'); assert.equal(await d.read(`${folder}/Attachments and Links/photo (v12).jpg`), 'new photo');
+      assert.equal(c.requests.filter(u => u.includes('/file/topics/')).length, 1); assert.equal(e.state.done[102].v, 12);
+    } finally { c.close(); }
+  });
   await test('documents worker authorizes Settings changes and refuses busy tabs and other owners', async () => {
     const e = worker(), d = directory(); await e.db.put('documents-candidate:first', { handle: d });
     assert.equal((await e.send('connect', { token: 'first' })).ok, false);

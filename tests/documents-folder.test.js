@@ -18,6 +18,41 @@ async function write(e, path, data, version = 5, tips = LI) {
 }
 async function test(name, fn) { try { await fn(); console.log('PASS ' + name); } catch (e) { console.log('FAIL ' + name + ': ' + e.stack); process.exitCode = 1; } }
 (async () => {
+  await test('mixed GI and LI archive recognizes GI versions 1 through 11 without a Requested suffix', async () => {
+    const e = env(), d = directory('Sorted - Stripped'), gi = 'GI72.12-P-053999', folder = `${gi} - Repair paint blistering on inside of 2nd left`;
+    for (let v = 1; v <= 11; v++) await d.put(`${folder}/${gi}_v${v}.pdf`, pdf(v));
+    await d.put(`${folder}/Attachments and Links/photo.jpg`, 'old photo');
+    await d.put(`${LI} - Odor/${LI}_v1.pdf`, pdf(1));
+    const log = { index: [{ tips: gi, tipsId: 102, version: 12, title: 'Repair paint', mdate: '2026-10-09' }, { ...ITEM, version: 1 }], done: { 102: { b: 1, v: 12 }, 101: { b: 2, v: 1 } } };
+    await e.repo.connect(d); const a = await e.repo.inventory(log), row = a.rows.find(x => x.tips === gi);
+    assert.equal(a.summary.indexed, 2); assert.equal(a.summary.found, 2); assert.equal(a.summary.complete, 1);
+    assert.equal(row.path, folder); assert.deepEqual(row.versions, Array.from({ length: 11 }, (_, i) => i + 1)); assert.deepEqual(row.missing, [12]); assert.equal(row.attachments, 1);
+    assert.equal(d.state.writes.length, 0);
+  });
+  await test('GI updates append v12 in the existing folder and retain every older photo and PDF', async () => {
+    const e = env(), d = directory('Sorted - Stripped'), gi = 'GI72.12-P-053999', folder = `${gi} - Repair paint blistering on inside of 2nd left`;
+    for (let v = 1; v <= 11; v++) await d.put(`${folder}/${gi}_v${v}.pdf`, pdf(v));
+    await d.put(`${folder}/Attachments and Links/photo.jpg`, 'old photo');
+    await e.repo.connect(d); await e.repo.start('run-one', 10, { index: [{ tips: gi, tipsId: 102, version: 12 }] });
+    assert((await write(e, `${gi}_v12.pdf`, pdf(12), 12, gi)).written);
+    assert((await write(e, 'Attachments and Links/photo.jpg', 'new photo', 12, gi)).written);
+    for (let v = 1; v <= 12; v++) assert.equal(await d.read(`${folder}/${gi}_v${v}.pdf`), pdf(v));
+    assert.equal(await d.read(`${folder}/Attachments and Links/photo.jpg`), 'old photo');
+    assert.equal(await d.read(`${folder}/Attachments and Links/photo (v12).jpg`), 'new photo');
+    await assert.rejects(write(e, `${LI}_v12.pdf`, pdf(12), 12, gi), /path|allowed/i);
+  });
+  await test('GI identity can be recovered from PDFs when the folder has a custom name', async () => {
+    const e = env(), d = directory(), gi = 'GI72.12-P-053999'; await d.put(`Paint repair/${gi}_v11.pdf`, pdf(11));
+    await e.repo.connect(d); const a = await e.repo.inventory({ index: [{ ...ITEM, tips: gi, version: 11 }] });
+    assert.equal(a.rows[0].path, 'Paint repair'); assert.deepEqual(a.rows[0].versions, [11]); assert.equal(a.summary.extraTopics, 0);
+  });
+  for (const [name, index, pattern] of [
+    ['duplicate number', [ITEM, { ...ITEM, tipsId: 102 }], /entry 2.*duplicate.*LI00\.00-P-066047.*entry 1/i],
+    ['invalid version', [{ ...ITEM, version: 0 }], /entry 1.*version.*0.*LI00\.00-P-066047/i],
+    ['invalid number', [{ ...ITEM, tips: 'bad-number' }], /entry 1.*document number.*BAD-NUMBER/i]
+  ]) await test(`invalid index identifies the entry and reason: ${name}`, async () => {
+    const e = env(); await e.repo.connect(directory()); await assert.rejects(e.repo.inventory({ index }), pattern);
+  });
   await test('inventory matches LI identities in nested folders and distinguishes log discrepancies', async () => {
     const e = env(), d = directory(), b = 'LI20.10-P-075374', c = 'LI40.10-P-070001', dup = 'LI50.10-P-070001', extra = 'LI60.10-P-070001';
     await d.put(`${TOPIC}/${LI}_v1.pdf`, pdf(1)); await d.put(`${TOPIC}/${LI}_v2.pdf`, ''); await d.put(`${TOPIC}/${LI}_v4.pdf`, pdf(4));

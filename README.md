@@ -2,13 +2,13 @@
 
 TIPS Exporter downloads XENTRY TIPS Reader topics: the specific LI documents you pick, everything your current TIPS search found, or the whole catalogue in batches. For each topic it saves the selected PDF versions and attachments; revision history, document data and links lists are optional. It runs inside your logged-in TIPS tab, so it never sees your password, and it looks and works like part of TIPS.
 
-**Version 1.16.0:** select your saved LI documents folder, scan it against the index log, and update it in place. New PDF versions are added beside older ones. New or changed attachments are added without replacing older files. Reusable index folders, PDF scrubbing, and ZIP exports remain available.
+**Version 1.16.1:** fixes folder scans rejecting GI documents in mixed GI/LI indexes. Folder discovery and PDF updates now accept the same document-number format as normal TIPS downloads, including GI72.12-P-053999. Existing folders do not need a `(Requested)` suffix. Actual invalid or duplicate index entries now show the entry number and reason. Older PDFs and attachments remain preserved.
 
 ## Install
 
 1. Download this repository with **Code → Download ZIP** and extract it to a permanent folder. Open the extracted repository folder that contains `manifest.json`.
 2. In Chrome, open `chrome://extensions` and switch on **Developer mode** (top right).
-3. Click **Load unpacked** and select the extracted folder that directly contains `manifest.json`. The extension card must show **1.16.0**.
+3. Click **Load unpacked** and select the extracted folder that directly contains `manifest.json`. The extension card must show **1.16.1**.
 4. Optional: pin the extension to the toolbar (puzzle icon, then the pin).
 
 Needs Chrome 111 or newer.
@@ -35,10 +35,10 @@ Only the selected CSV is updated. PDF/ZIP downloads still use Chrome's download 
 ## Saved documents folder and verification
 
 1. Open **⚙ → Documents folder → Choose / change documents folder…**.
-2. Choose the **parent containing your LI folders**, including any batch subfolders. Select your archive, not the extension installation folder or an individual LI folder.
+2. Choose the **parent containing your LI/GI document folders**, including any batch subfolders. Select your archive, not the extension installation folder or an individual LI folder.
 3. Set the attachment subfolder used inside each LI; the default is **Attachments and Links**. Click **Use this documents folder**.
 4. In **Bulk export → Saved documents**, click **Scan & verify** to compare the folder with the currently loaded index/progress log. Use the shared index folder above, or import your log first.
-5. Click **Update saved LIs** to fetch missing PDF versions and current attachments. Check **Include missing LIs from index** only when you also want to create entirely missing topic folders.
+5. Click **Update saved documents** to fetch missing PDF versions and current attachments. Check **Include missing documents from index** only when you also want to create entirely missing topic folders.
 
 The inventory lists saved and missing PDF versions, empty/invalid PDFs, duplicate LI folders, LIs outside the index, and missing attachments tracked by earlier folder updates. It distinguishes folders **marked exported but missing** from **pending LIs not yet saved**. Download the complete **inventory CSV** for every LI, its folder path, and discrepancies. Scans and folder updates never change the index log's exported/pending status.
 

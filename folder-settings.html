@@ -2,7 +2,7 @@
 <html lang="en">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Folders · TIPS Exporter</title><link rel="stylesheet" href="folder-settings.css"></head>
 <body><main>
-  <header><div class="eyebrow">TIPS EXPORTER <span id="version"></span></div><h1>Folders</h1><p>Select the index log and your saved LI archive. Future installations can select these same locations to continue.</p></header>
+  <header><div class="eyebrow">TIPS EXPORTER <span id="version"></span></div><h1>Folders</h1><p>Select the index log and your saved LI/GI archive. Future installations can select these same locations to continue.</p></header>
   <section aria-labelledby="current-title"><h2 id="current-title">Index folder</h2><p id="current-location">Reading settings…</p><p id="folder-status" role="status" aria-live="polite"></p>
     <div class="buttons"><button id="sync-now">Check &amp; sync</button><button id="allow-access">Allow folder access</button><button id="reload-index">Reload folder index</button><button id="disconnect">Disconnect</button></div>
     <p class="hint">Reload folder index replaces the browser's cached index and progress with the selected file. Use it to adopt changes from another installation.</p>
@@ -15,12 +15,12 @@
   <p id="result" role="status" aria-live="polite"></p>
   <section aria-labelledby="documents-title"><h2 id="documents-title">Documents folder</h2>
     <p id="documents-location">Reading settings…</p><p id="documents-status" role="status" aria-live="polite"></p>
-    <button id="choose-documents" class="primary" disabled>Choose documents folder…</button><p id="selected-documents" class="hint">Select the parent containing your LI folders, including any batch subfolders.</p>
-    <label for="documents-attachments">Attachment subfolder inside each LI</label><input id="documents-attachments" value="Attachments and Links" spellcheck="false" autocomplete="off">
-    <label class="check"><input type="checkbox" id="documents-auto" checked> Update saved LIs automatically after Check new</label>
-    <p class="hint">New PDF versions are added beside saved versions. Older attachments stay; changed files get versioned names. Automatic updates only cover LI folders already present.</p>
+    <button id="choose-documents" class="primary" disabled>Choose documents folder…</button><p id="selected-documents" class="hint">Select the parent containing your document folders (LI/GI), including any batch subfolders.</p>
+    <label for="documents-attachments">Attachment subfolder inside each document</label><input id="documents-attachments" value="Attachments and Links" spellcheck="false" autocomplete="off">
+    <label class="check"><input type="checkbox" id="documents-auto" checked> Update saved documents automatically after Check new</label>
+    <p class="hint">New PDF versions are added beside saved versions. Older attachments stay; changed files get versioned names. Automatic updates only cover document folders already present.</p>
     <div class="buttons"><button id="use-documents" class="primary" disabled>Use this documents folder</button><button id="save-documents" disabled>Save folder settings</button><button id="allow-documents" disabled>Allow documents access</button><button id="disconnect-documents" disabled>Disconnect documents</button></div>
-    <p class="hint">In TIPS → Bulk export, use Scan &amp; verify to compare the folder with the loaded index log, or Update saved LIs to fetch missing versions and current attachments. The index log has no attachment manifest; attachments are checked against live TIPS during updates.</p>
+    <p class="hint">In TIPS → Bulk export, use Scan &amp; verify to compare the folder with the loaded index log, or Update saved documents to fetch missing versions and current attachments. The index log has no attachment manifest; attachments are checked against live TIPS during updates.</p>
     <p id="documents-result" role="status" aria-live="polite"></p>
   </section>
   <footer>Index changes and approved batch progress are saved automatically. Folder updates write directly into the documents folder; ZIP downloads use your browser's download location. Chrome may ask you to allow access again after restarting or installing another copy.</footer>

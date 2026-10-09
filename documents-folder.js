@@ -1,12 +1,13 @@
-/* Append-only LI archive storage. Native handles and writable streams stay in the extension. */
+/* Append-only TIPS archive storage. Native handles and writable streams stay in the extension. */
 (function (root, factory) {
   const api = factory();
   if (typeof module === 'object' && module.exports) module.exports = api;
   else root.TIPSDocumentsFolder = api;
 })(globalThis, () => {
   'use strict';
-  const LI = /^LI\d{2}\.\d{2}-[A-Z]-\d{6}$/i, PREFIX = /^(LI\d{2}\.\d{2}-[A-Z]-\d{6})(?=$|[\s_(.-])/i;
-  const PDF = /^(LI\d{2}\.\d{2}-[A-Z]-\d{6})_v([1-9]\d*)\.pdf$/i;
+  // Match the normal Reader exporter's FULL_NO format, including GI as well as LI.
+  const DOCUMENT_NO = /^[A-Z]{2}\d{2}\.\d{2}-[A-Z]-\d{6}$/i, PREFIX = /^([A-Z]{2}\d{2}\.\d{2}-[A-Z]-\d{6})(?=$|[\s_(.-])/i;
+  const PDF = /^([A-Z]{2}\d{2}\.\d{2}-[A-Z]-\d{6})_v([1-9]\d*)\.pdf$/i;
   const KEY = 'documentsConnection', RUN = 'documentsRun', STATUS = 'documentsStatus', CHUNK = 262144;
   const esc = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   function leaf(value) {
@@ -32,7 +33,7 @@
     let tail = Promise.resolve(); const uploads = new Map();
     async function emit(r, phase = 'ready', message = '', extra = {}) {
       const s = r ? { configured: true, folderName: r.handle.name, epoch: r.epoch, attachmentFolder: r.attachmentFolder, auto: r.auto,
-        phase, message: message || 'Documents folder connected.', ...extra } : { configured: false, phase: 'disconnected', auto: false, message: 'Choose the parent folder containing your saved LI folders.' };
+        phase, message: message || 'Documents folder connected.', ...extra } : { configured: false, phase: 'disconnected', auto: false, message: 'Choose the parent folder containing your saved document folders (LI/GI).' };
       await db.put(STATUS, s); await writeStatus(s); return s;
     }
     const queue = fn => { const p = tail.then(fn).catch(async e => { try { await emit(await db.get(KEY), /permission|access|NotAllowed/i.test(e.message || e.name) ? 'permission' : 'error', e.message); } catch (_) {} throw e; }); tail = p.catch(() => {}); return p; };
@@ -70,7 +71,7 @@
           const versions = [], invalid = [], notes = [], attachments = [], attachmentHandle = await entry(d, r.attachmentFolder, 'directory');
           for (const f of list) if (f.kind === 'file') {
             const m = PDF.exec(f.name); if (!m) continue;
-            if (m[1].toUpperCase() !== tips) { notes.push(`Unexpected LI PDF: ${f.name}`); continue; }
+            if (m[1].toUpperCase() !== tips) { notes.push(`Unexpected document PDF: ${f.name}`); continue; }
             const version = +m[2]; if (version > 10000) { notes.push(`Invalid PDF version: ${f.name}`); continue; }
             try { (await validPdf(await f.getFile()) ? versions : invalid).push(version); }
             catch (e) { invalid.push(version); notes.push(`Cannot read ${f.name}: ${e.message}`); }
@@ -81,23 +82,25 @@
           topic = { tips, path, versions: [...new Set(versions)].sort((a,b) => a-b), invalid: [...new Set(invalid)].sort((a,b) => a-b), attachments: attachments.length, missingAttachments, notes, last };
           if (!found.has(tips)) found.set(tips, []); found.get(tips).push(topic);
         }
-        if (!path && tips && pdfIds.length) throw Error('Select the parent containing the LI folders, not an individual LI folder.');
-        if (!topic && pdfIds.length) issues.push(`Versioned PDFs outside a unique LI folder: ${path || '(selected folder)'}`);
+        if (!path && tips && pdfIds.length) throw Error('Select the parent containing the document folders, not an individual document folder.');
+        if (!topic && pdfIds.length) issues.push(`Versioned PDFs outside a unique document folder: ${path || '(selected folder)'}`);
         let nested = 0;
         for (const child of list) if (child.kind === 'directory' && !child.name.startsWith('.') && !(topic && child.name.toLowerCase() === r.attachmentFolder.toLowerCase())) {
           if (depth >= 8) throw Error('Folder scan exceeded 8 nested levels. Choose a more specific archive folder.');
           nested += await walk(child, path ? path + '/' + child.name : child.name, depth + 1);
         }
-        if (topic && nested) { topic.ambiguous = true; topic.notes.push('This folder also contains nested LI folders. Move loose PDFs into their intended LI folder before updating this location.'); }
+        if (topic && nested) { topic.ambiguous = true; topic.notes.push('This folder also contains nested document folders. Move loose PDFs into their intended document folder before updating this location.'); }
         return nested + (topic ? 1 : 0);
       }
       await walk(r.handle, '', 0);
-      const rows = [], indexed = new Set();
+      const rows = [], indexed = new Map();
       const summary = { indexed: 0, found: 0, complete: 0, missingTopics: 0, missingExported: 0, pendingNotSaved: 0, versionGaps: 0, invalidPdfs: 0, duplicateTopics: 0, ambiguousTopics: 0, extraTopics: 0, missingAttachments: 0 };
-      for (const x of snapshot.index || []) {
+      for (const [i, x] of (snapshot.index || []).entries()) {
         const tips = String(x.tips || '').toUpperCase(), v = +x.version;
-        if (!LI.test(tips) || !Number.isSafeInteger(v) || v < 1 || v > 10000 || indexed.has(tips)) throw Error('The index contains an invalid or duplicate LI/version. Check the index log before verifying this folder.');
-        indexed.add(tips); summary.indexed++;
+        if (!DOCUMENT_NO.test(tips)) throw Error(`Index entry ${i + 1}: invalid document number "${tips || '(blank)'}". Expected a number such as LI00.00-P-066047 or GI72.12-P-053999.`);
+        if (!Number.isSafeInteger(v) || v < 1 || v > 10000) throw Error(`Index entry ${i + 1}: invalid version "${x.version}" for ${tips}. Expected a whole number from 1 to 10000.`);
+        if (indexed.has(tips)) throw Error(`Index entry ${i + 1}: duplicate document number ${tips} (also in entry ${indexed.get(tips)}). Resolve the duplicate in the index log before verifying this folder.`);
+        indexed.set(tips, i + 1); summary.indexed++;
         const matches = found.get(tips) || [], t = matches.length === 1 ? matches[0] : null;
         const done = snapshot.done?.[x.tipsId], exported = !!done && (done.v == null || +done.v === v);
         const missing = []; for (let n = 1; n <= v; n++) if (!t?.versions.includes(n)) missing.push(n);
@@ -139,7 +142,7 @@
         if (await db.get(RUN)) throw Error('A documents folder update is already running in another tab.');
         const r = await current(); await cleanupPending(); const inventory = await scan(r, snapshot), topics = inventory.topics.map(t => ({ ...t, create: false }));
         if (options.includeMissing && !options.auto) for (const x of snapshot.index || []) if (inventory.rows.find(a => a.tips === x.tips.toUpperCase())?.folderStatus === 'missing') topics.push({ tips: x.tips.toUpperCase(), path: topicFolder(x), versions: [], invalid: [], missingAttachments: [], notes: [], create: true, last: null });
-        await db.put(RUN, { token, owner, epoch: r.epoch, topics, fileRecords: {} }); await emit(r, 'running', 'Updating saved LI documents…'); return { token, topics, inventory };
+        await db.put(RUN, { token, owner, epoch: r.epoch, topics, fileRecords: {} }); await emit(r, 'running', 'Updating saved documents…'); return { token, topics, inventory };
       }),
       begin: (token, owner, file) => queue(async () => {
         const { r, run } = await lease(token, owner), topic = run.topics.find(t => t.tips === file.tips);

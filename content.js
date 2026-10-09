@@ -534,7 +534,7 @@
         try { await documentsRequest('end', { token: run.token, summary }); }
         catch (e) { summary.errors.push(e.message); }
       }
-      S.documentResult = run.cancel ? 'Update stopped. Completed files were kept.' : `${summary.topics} LI(s) checked · ${summary.pdfs} PDF(s) and ${summary.attachments} attachment(s) added · ${summary.skipped} unchanged file(s) skipped.`;
+      S.documentResult = run.cancel ? 'Update stopped. Completed files were kept.' : `${summary.topics} document(s) checked · ${summary.pdfs} PDF(s) and ${summary.attachments} attachment(s) added · ${summary.skipped} unchanged file(s) skipped.`;
       if (summary.errors.length) S.documentResult += ` ${summary.errors.length} issue(s):\n` + summary.errors.slice(0, 100).join('\n');
       if (started) {
         try { S.documentInventory = (await documentsRequest('inventory', { snapshot: documentsSnapshot() })).inventory; }
@@ -1238,17 +1238,17 @@
     let report = '';
     if (a) {
       const n = a.summary, problems = a.rows.filter(r => r.folderStatus !== 'present');
-      report = `<div id="doc_inventory" class="sec"><b>${n.found} of ${n.indexed} indexed LIs found · ${n.complete} complete for indexed PDF versions</b>
-        <span class="mut sm">Missing folders: ${n.missingExported} marked exported, ${n.pendingNotSaved} pending in log. Version gaps in saved folders: ${n.versionGaps}. Invalid PDFs: ${n.invalidPdfs}. Duplicate LI folders: ${n.duplicateTopics}. Ambiguous locations: ${n.ambiguousTopics || 0}. LIs outside index: ${n.extraTopics}. Missing tracked attachments: ${n.missingAttachments}.</span>
+      report = `<div id="doc_inventory" class="sec"><b>${n.found} of ${n.indexed} indexed documents found · ${n.complete} complete for indexed PDF versions</b>
+        <span class="mut sm">Missing folders: ${n.missingExported} marked exported, ${n.pendingNotSaved} pending in log. Version gaps in saved folders: ${n.versionGaps}. Invalid PDFs: ${n.invalidPdfs}. Duplicate document folders: ${n.duplicateTopics}. Ambiguous locations: ${n.ambiguousTopics || 0}. Documents outside index: ${n.extraTopics}. Missing tracked attachments: ${n.missingAttachments}.</span>
         <span class="mut sm">${esc(a.attachmentNote)} PDF checks cover filenames, versions and headers, not every page.</span>
-        ${problems.length || a.issues.length ? `<details><summary>Discrepancies (${problems.length + a.issues.length})</summary><pre>${esc([...a.issues, ...problems.slice(0, 100).map(r => `${r.tips}: ${r.folderStatus}; log ${r.indexStatus}${r.missing.length ? '; missing v' + r.missing.slice(0, 30).join(', v') : ''}${r.invalid.length ? '; invalid v' + r.invalid.join(', v') : ''}${r.missingAttachments.length ? '; missing attachments: ' + r.missingAttachments.join(', ') : ''}${r.notes.length ? '; ' + r.notes.join('; ') : ''}\n${r.path || '(no folder)'}`)].join('\n'))}</pre>${problems.length > 100 ? '<span class="mut sm">First 100 shown. Download the full inventory CSV for every LI.</span>' : ''}</details>` : '<span class="okc">All indexed PDF versions found. See the attachment note above.</span>'}
+        ${problems.length || a.issues.length ? `<details><summary>Discrepancies (${problems.length + a.issues.length})</summary><pre>${esc([...a.issues, ...problems.slice(0, 100).map(r => `${r.tips}: ${r.folderStatus}; log ${r.indexStatus}${r.missing.length ? '; missing v' + r.missing.slice(0, 30).join(', v') : ''}${r.invalid.length ? '; invalid v' + r.invalid.join(', v') : ''}${r.missingAttachments.length ? '; missing attachments: ' + r.missingAttachments.join(', ') : ''}${r.notes.length ? '; ' + r.notes.join('; ') : ''}\n${r.path || '(no folder)'}`)].join('\n'))}</pre>${problems.length > 100 ? '<span class="mut sm">First 100 shown. Download the full inventory CSV for every document.</span>' : ''}</details>` : '<span class="okc">All indexed PDF versions found. See the attachment note above.</span>'}
         <button class="b bar sm" id="doc_report">Download inventory CSV</button></div>`;
     }
     return `<div class="sec" style="border-top:1px solid var(--div);padding-top:16px"><h3>Saved documents</h3>
-      <span class="mut">${esc(s.configured ? s.folderName + ' / [LI folder] / ' + s.attachmentFolder : 'Choose your documents folder in Settings to inventory and update saved LIs.')}</span>
+      <span class="mut">${esc(s.configured ? s.folderName + ' / [document folder] / ' + s.attachmentFolder : 'Choose your documents folder in Settings to inventory and update saved LI/GI documents.')}</span>
       <span class="mut sm">${s.configured && s.auto ? 'Automatic updates after Check new are on. ' : ''}Older PDFs and attachments are kept. Changed attachments get versioned names.</span>
-      <div class="grid2"><button class="b bar" id="doc_scan" ${disabled ? 'disabled' : ''}>Scan &amp; verify</button><button class="b pri" id="doc_update" ${disabled ? 'disabled' : ''}>Update saved LIs</button></div>
-      <label class="ck"><input type="checkbox" id="doc_missing" ${S.documentsIncludeMissing ? 'checked' : ''} ${disabled ? 'disabled' : ''}> Include missing LIs from index in a manual update</label>
+      <div class="grid2"><button class="b bar" id="doc_scan" ${disabled ? 'disabled' : ''}>Scan &amp; verify</button><button class="b pri" id="doc_update" ${disabled ? 'disabled' : ''}>Update saved documents</button></div>
+      <label class="ck"><input type="checkbox" id="doc_missing" ${S.documentsIncludeMissing ? 'checked' : ''} ${disabled ? 'disabled' : ''}> Include missing documents from index in a manual update</label>
       <button class="b bar sm" id="doc_folder" ${busy() || S.checking ? 'disabled' : ''}>Choose / change documents folder…</button>
       ${run ? `<span role="status">${esc(run.label)}</span>${!run.scan ? `<button class="b dan" id="doc_stop" ${run.cancel ? 'disabled' : ''}>${run.cancel ? 'Stopping…' : 'Stop folder update'}</button>` : ''}` : ''}
       <pre class="sm" id="doc_status" role="status" style="white-space:pre-wrap">${esc(S.documentResult || s.message || '')}</pre>${report}</div>`;
@@ -1326,7 +1326,7 @@
       </div>
       <div class="sec" style="padding-top:12px;border-top:1px solid var(--div)"><b>Documents folder</b>
         <span class="mut">${esc(S.documents.configured ? S.documents.folderName : 'No documents folder selected')}</span>
-        <span class="mut sm">Inventory saved LIs against the index log, add missing PDF versions and keep older attachments. Scan and update controls are in Bulk export.</span>
+        <span class="mut sm">Inventory saved LI/GI documents against the index log, add missing PDF versions and keep older attachments. Scan and update controls are in Bulk export.</span>
         <button class="b bar" id="s_documentsFolder" ${busy() || S.checking ? 'disabled' : ''}>Choose / change documents folder…</button>
       </div>
       <div class="sec" style="padding-top:12px;border-top:1px solid var(--div)"><b>Data files to include</b><span class="mut">All PDF versions share the topic folder; attachments go in Attachments and Links. Optional data files are off by default. Any failures are listed in the export errors.</span>

@@ -13,7 +13,7 @@
     current = await TIPSFolderDB.get('documentsConnection') || null;
     const r = await send('status'), s = r?.status;
     $('documents-location').textContent = current ? current.handle.name : 'No documents folder selected';
-    $('documents-status').textContent = s?.message || 'Choose the parent containing your saved LI folders.';
+    $('documents-status').textContent = s?.message || 'Choose the parent containing your saved document folders (LI/GI).';
     if (current && !selected) { $('documents-attachments').value = current.attachmentFolder; $('documents-auto').checked = current.auto; }
     controls();
   }
