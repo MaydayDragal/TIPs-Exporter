@@ -20,6 +20,7 @@
       if (m.action === 'open') { await chrome.runtime.openOptionsPage(); return { ok: true }; }
       if (m.action === 'status') return { ok: true, status: await repo.status() };
       if (m.action === 'set-auto') return { ok: true, status: await repo.setAuto(m.auto) };
+      if (m.action === 'set-interval') return { ok: true, status: await repo.setPollMinutes(m.minutes) };
       if (m.action === 'inventory') {
         const snapshot = reader ? m.snapshot : await chrome.storage.local.get(['index', 'done']);
         return { ok: true, inventory: await repo.inventory(snapshot) };

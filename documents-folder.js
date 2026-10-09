@@ -9,6 +9,8 @@
   const DOCUMENT_NO = /^[A-Z]{2}\d{2}\.\d{2}-[A-Z]-\d{6}$/i, PREFIX = /^([A-Z]{2}\d{2}\.\d{2}-[A-Z]-\d{6})(?=$|[\s_(.-])/i;
   const PDF = /^([A-Z]{2}\d{2}\.\d{2}-[A-Z]-\d{6})_v([1-9]\d*)\.pdf$/i;
   const KEY = 'documentsConnection', RUN = 'documentsRun', STATUS = 'documentsStatus', CHUNK = 262144;
+  const validMinutes = value => Number.isInteger(value) && value >= 1 && value <= 1440;
+  function pollMinutes(value = 10) { if (!validMinutes(value)) throw Error('Sync interval must be a whole number from 1 to 1440 minutes.'); return value; }
   const esc = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   function leaf(value) {
     const s = String(value || '');
@@ -33,10 +35,17 @@
     let tail = Promise.resolve(); const uploads = new Map();
     async function emit(r, phase = 'ready', message = '', extra = {}) {
       const s = r ? { configured: true, folderName: r.handle.name, epoch: r.epoch, attachmentFolder: r.attachmentFolder, auto: r.auto,
-        phase, message: message || 'Documents folder connected.', ...extra } : { configured: false, phase: 'disconnected', auto: false, message: 'Choose the parent folder containing your saved document folders (LI/GI).' };
+        pollMinutes: r.pollMinutes ?? 10, phase, message: message || 'Documents folder connected.', ...extra } : { configured: false, phase: 'disconnected', auto: false, message: 'Choose the parent folder containing your saved document folders (LI/GI).' };
       await db.put(STATUS, s); await writeStatus(s); return s;
     }
     const queue = fn => { const p = tail.then(fn).catch(async e => { try { await emit(await db.get(KEY), /permission|access|NotAllowed/i.test(e.message || e.name) ? 'permission' : 'error', e.message); } catch (_) {} throw e; }); tail = p.catch(() => {}); return p; };
+    async function automationStatus(r, message) {
+      const previous = await db.get(STATUS) || {};
+      return emit(r, previous.phase || 'ready', message, {
+        ...(previous.summary ? { summary: previous.summary } : {}), ...(previous.inventory ? { inventory: previous.inventory } : {}),
+        ...(previous.lastUpdated ? { lastUpdated: previous.lastUpdated } : {})
+      });
+    }
     async function access(r) { if (!r) throw Error('Choose a documents folder in Settings first.'); if (await r.handle.queryPermission({ mode: 'readwrite' }) !== 'granted') throw Error('Allow documents folder access in Settings, then try again.'); return r; }
     async function current() { return access(await db.get(KEY)); }
     async function lease(token, owner, files = true) {
@@ -206,20 +215,23 @@
       connect: (handle, options = {}) => queue(async () => {
         const attachmentFolder = leaf(options.attachmentFolder || 'Attachments and Links');
         if (await db.get(RUN)) throw Error('A folder update is running. Stop it before changing folders.');
-        const r = { handle, attachmentFolder, auto: options.auto !== false, epoch: crypto.randomUUID(), progress: {} };
+        const r = { handle, attachmentFolder, auto: options.auto !== false, pollMinutes: pollMinutes(options.pollMinutes), epoch: crypto.randomUUID(), progress: {} };
         await access(r); await db.put(KEY, r); return emit(r);
       }),
       configure: options => queue(async () => {
         if (await db.get(RUN)) throw Error('A folder update is running. Stop it before changing folder settings.');
-        const r = await current(); r.attachmentFolder = leaf(options.attachmentFolder || r.attachmentFolder); r.auto = options.auto !== false; await db.put(KEY, r); return emit(r);
+        const r = await current(), interval = pollMinutes(options.pollMinutes ?? r.pollMinutes);
+        r.attachmentFolder = leaf(options.attachmentFolder || r.attachmentFolder); r.auto = options.auto !== false; r.pollMinutes = interval; await db.put(KEY, r); return emit(r);
       }),
       setAuto: auto => typeof auto !== 'boolean' ? Promise.reject(Error('Invalid automatic sync setting.')) : queue(async () => {
         const r = await db.get(KEY); if (!r) throw Error('Choose a documents folder first.');
         r.auto = auto; await db.put(KEY, r);
-        const previous = await db.get(STATUS) || {};
-        return emit(r, previous.phase || 'ready', auto ? 'Automatic library sync is on when TIPS opens.' : 'Automatic library sync is paused.',
-          { ...(previous.summary ? { summary: previous.summary } : {}), ...(previous.inventory ? { inventory: previous.inventory } : {}),
-            ...(previous.lastUpdated ? { lastUpdated: previous.lastUpdated } : {}) });
+        return automationStatus(r, auto ? `Automatic library sync is on: every ${r.pollMinutes ?? 10} minutes while TIPS is open.` : 'Automatic library sync is paused.');
+      }),
+      setPollMinutes: value => !validMinutes(value) ? Promise.reject(Error('Sync interval must be a whole number from 1 to 1440 minutes.')) : queue(async () => {
+        const r = await db.get(KEY); if (!r) throw Error('Choose a documents folder first.');
+        r.pollMinutes = value; await db.put(KEY, r);
+        return automationStatus(r, `Background sync interval saved: ${value} minutes.`);
       }),
       disconnect: () => queue(async () => { if (await db.get(RUN)) throw Error('A folder update is running. Stop it first.'); await db.del(KEY); return emit(null); }),
       status: () => queue(async () => await db.get(STATUS) || emit(await db.get(KEY))),

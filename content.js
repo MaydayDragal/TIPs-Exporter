@@ -46,11 +46,11 @@
     retry: {},          // tipsId -> batches in which the document was incomplete (temporary file failures)
     folder: { configured: false, epoch: null, phase: 'disconnected' }, folderLock: null, folderSyncing: false, progressBase: '',
     documents: { configured: false }, documentRun: null, documentInventory: null, documentResult: '', documentsIncludeMissing: false,
-    msg: ''
+    msg: '', sessionExpired: false
   };
   const DEFAULT_SEARCH = { fuzzyActive: true, correlationId: 4, fallbackLang: 'en', area: 'WS', creator: null, sortorder: { field: 'mdate', order: 'desc' }, lang: { lang: 'en' }, countries: ['US'], vehicleContext: {}, timefilter: {}, docName: '', workstate: '', brandNames: ['Maybach', 'Mercedes-Benz'], productGroupNames: ['PKW', 'Supersportwagen'], pagination: { pageNumber: 1, pageSize: 50 }, drilldowns: [{ key: 'country', identifier: 'US' }], favFilterActive: false, searchField: 'all', provideNavigation: 'full', totalHitsCountOnly: false, useAi: false };
 
-  let loaded = false;   // settings read from storage; nothing may be saved before this
+  let loaded = false, readyForPolling = false;   // settings and any interrupted work must load before automation
   async function load() {
     S.folder = await store.get('indexFolder', S.folder);
     S.documents = await store.get('documentsFolder', S.documents);
@@ -203,7 +203,7 @@
   const lastBatchNo = () => { let m = 0; for (const d of Object.values(S.done)) if (+d.b > m) m = +d.b; for (const h of S.history) if (+h.n > m) m = +h.n; return m; };
   function nextBatch() { return pendingItems().length ? lastBatchNo() + 1 : null; }
   const remainingBatches = () => Math.ceil(pendingItems().length / S.settings.batchSize);
-  class SessionError extends Error { }
+  class SessionError extends Error { constructor(message) { super(message); S.sessionExpired = true; } }
   class TransientError extends Error { }   // server/network trouble that survived the retries – worth trying again later
 
   const fileNameOrder = new Intl.Collator('en', { numeric: true, sensitivity: 'base' });
@@ -260,6 +260,7 @@
     let other = false; try { other = !!(r.redirected && r.url && new URL(r.url).origin !== location.origin); } catch (e) { }
     if (r.redirected && (other || /login|logon|auth|sso|saml/i.test(r.url))) throw new SessionError('Session expired – TIPS redirected to the login page');
     if (r.ok && expect && expect !== 'text/html' && /text\/html/i.test(ctype(r))) throw new SessionError('Session expired – TIPS returned its login page');
+    if (r.ok) S.sessionExpired = false;
     return r;
   }
   // After a network-level failure: is it the session (login redirect) or really the network?
@@ -514,6 +515,20 @@
     clearTimeout(documentsTimer);
     const checked = await refreshIndex(false, false, false);
     if (checked) await updateDocuments({ includeMissing: S.settings.libraryIncludeMissing });
+  }
+  function pollingStatus() {
+    const occupied = !readyForPolling || busy() || S.checking || !!persisting || S.single?.phase === 'looking' || !!pick;
+    return { busy: occupied, ready: !occupied && !!(S.documents.configured && S.documents.auto && S.index.length && sessionOK() && !S.sessionExpired && !folderProblem() && navigator.onLine !== false) };
+  }
+  async function scheduledLibrarySync() {
+    clearTimeout(documentsTimer);
+    try {
+      const checked = await refreshIndex(false, true, false);
+      if (checked && S.documents.configured && S.documents.auto) await updateDocuments({ auto: true, includeMissing: S.settings.libraryIncludeMissing });
+    } catch (e) {
+      S.documentResult = e instanceof SessionError ? 'Automatic sync paused: log in to TIPS again, then reload this tab or use Sync now.' : 'Automatic sync could not finish: ' + e.message;
+      render();
+    }
   }
   async function updateDocuments({ auto = false, retryExceptions = false, includeMissing } = {}) {
     if (busy() || S.checking || S.single?.phase === 'looking' || !S.documents.configured) return;
@@ -1059,7 +1074,7 @@
   const EXT_VERSION = (hasChrome && chrome.runtime && chrome.runtime.getManifest && chrome.runtime.getManifest().version) || 'dev';
   const HELP_URL = 'https://github.com/MaydayDragal/TIPs-Exporter#readme';
   let diag = null;   // results of "Check setup"
-  const S_FIELDS = ['s_bs', 's_delay', 's_delay2', 's_ps', 's_outlet', 's_user', 's_ver', 's_pdfStrings'];
+  const S_FIELDS = ['s_bs', 's_delay', 's_delay2', 's_ps', 's_outlet', 's_user', 's_ver', 's_pdfStrings', 's_pollMinutes'];
   const css = `
   :host{all:initial}
   *{box-sizing:border-box}
@@ -1303,7 +1318,9 @@
       <div class="card"><div class="bd"><b>Documents folder</b><span class="mut sm">${esc(s.configured ? s.folderName + ' / [LI folder] / ' + s.attachmentFolder : 'Choose the parent folder containing your saved LIs.')}</span>
         <b>Index log</b><span class="mut sm">${esc(folderDetails())}</span></div></div>
       <button class="b bar" id="library_folders" ${disabled ? 'disabled' : ''}>Folder settings</button>
-      <label class="ck"><input type="checkbox" id="library_auto" ${s.auto ? 'checked' : ''} ${disabled || !s.configured ? 'disabled' : ''}> Automatically sync when TIPS opens</label>
+      <label class="ck"><input type="checkbox" id="library_auto" ${s.auto ? 'checked' : ''} ${disabled || !s.configured ? 'disabled' : ''}> Automatically sync</label>
+      <span class="mut sm">Check when TIPS opens, then every ${s.pollMinutes ?? 10} minutes while TIPS remains open. Change the interval in Settings.</span>
+      ${S.sessionExpired ? '<span class="alc sm">Automatic checks paused until you log in again and reload this tab or use Sync now.</span>' : ''}
       <label class="ck"><input type="checkbox" id="library_missing" ${S.settings.libraryIncludeMissing ? 'checked' : ''} ${disabled ? 'disabled' : ''}> Download indexed documents missing from this folder</label>
       <span class="mut sm">Sync checks recent index changes, then downloads only changed or missing files. TIPS must be open and logged in.</span>
       ${!S.index.length ? '<span class="alc sm">Select your existing index in Folder settings. To start a new catalogue, use Advanced → Bulk export → Build index.</span>' : `<span class="mut sm">${fmtN(S.index.length)} indexed documents${S.lastCheck ? ' · Last check ' + esc(when(S.lastCheck.at)) : ''}</span>`}
@@ -1388,7 +1405,11 @@
   // ---- settings
   function vSettings() {
     const s = S.settings;
-    const body = `<h3>Settings</h3><details id="settings_export"><summary>Advanced export and session settings</summary>
+    const body = `<h3>Settings</h3><div class="sec"><b>Automatic library sync</b>
+      <label class="fld">Check every (minutes)<input type="number" id="s_pollMinutes" min="1" max="1440" step="1" value="${S.documents.pollMinutes ?? 10}" ${!S.documents.configured ? 'disabled' : ''}></label>
+      <span class="mut sm">Default: 10 minutes. Keep a logged-in TIPS tab open; it can remain in the background. The Library automatic-sync switch pauses these checks.</span>
+      ${!S.documents.configured ? '<span class="mut sm">Connect your documents folder to save an interval.</span>' : ''}</div>
+      <details id="settings_export"><summary>Advanced export and session settings</summary>
       <label class="fld">Batch size <input class="s" type="number" id="s_bs" value="${s.batchSize}" min="1" max="500"></label>
       <label class="fld">Delay between documents (ms) <span class="pair"><input class="s" type="number" id="s_delay" value="${s.delayMs}" min="0" step="250" aria-label="Minimum delay"> – <input class="s" type="number" id="s_delay2" value="${s.delayMaxMs}" min="0" step="250" aria-label="Maximum delay"></span></label>
       <label class="fld">Search page size <span class="pair"><span class="${s.pageSizeSrc === 'detected' ? 'okc' : s.pageSizeSrc === 'manual' ? 'mut' : 'alc'}">${s.pageSizeSrc === 'detected' ? '✓ matches TIPS' : s.pageSizeSrc === 'manual' ? 'set manually' : 'not detected yet'}</span><input class="s" type="number" id="s_ps" value="${s.pageSize}" min="1" max="500"></span></label>
@@ -1559,7 +1580,9 @@
     // settings
     on('s_indexFolder', 'onclick', openFolderSettings);
     on('s_documentsFolder', 'onclick', safeRun(() => documentsRequest('open')));
-    on('s_save', 'onclick', async () => {
+    on('s_save', 'onclick', safeRun(async () => {
+      const interval = +$('s_pollMinutes').value;
+      if (!Number.isInteger(interval) || interval < 1 || interval > 1440) { setMsg('Sync interval must be a whole number from 1 to 1440 minutes.'); return; }
       const bs = Math.round(+$('s_bs').value);
       if (!(bs >= 1 && bs <= 500)) { setMsg('Batch size must be 1–500.'); return; }
       const ps = Math.round(+$('s_ps').value);
@@ -1572,8 +1595,9 @@
       if (!busy() || !s.pdfScrub.enabled) s.user = $('s_user').value.trim();
       if (!busy()) readPdfBoxes();
       readFileBoxes();
+      if (S.documents.configured && interval !== (S.documents.pollMinutes ?? 10)) await documentsRequest('set-interval', { minutes: interval });
       sDraft = {}; await saveSettings(); setMsg(`Settings saved. Batch size is now ${bs}.`);
-    });
+    }));
     const FK = ['docJson', 'histCsv', 'histJson', 'attCsv', 'manifest'];
     const readPdfBoxes = () => {
       s.pdfScrub.enabled = true;
@@ -2038,6 +2062,13 @@
   window.addEventListener('beforeunload', e => { if (S.run || S.documentRun || S.approving || S.importing || persisting) { e.preventDefault(); e.returnValue = ''; } });
   if (hasChrome && chrome.runtime && chrome.runtime.onMessage) {
     chrome.runtime.onMessage.addListener((m, _s, reply) => {
+      if (m?.type === 'library-poll-status' || m?.type === 'library-poll') {
+        if (_s?.id !== chrome.runtime.id) { reply({ ready: false, accepted: false }); return; }
+        const status = pollingStatus();
+        if (m.type === 'library-poll-status') { reply(status); return; }
+        if (!status.ready) { reply({ accepted: false }); return; }
+        scheduledLibrarySync(); reply({ accepted: true }); return;
+      }
       if (m?.type === 'documents-folder-active') { reply({ active: S.documentRun?.token === m.token }); return; }
       if (m?.type === 'index-folder-lock') {
         if (busy() || S.checking || persisting || S.single?.phase === 'looking') { reply({ locked: false }); return; }
@@ -2068,7 +2099,7 @@
   if (!hasChrome) window.__TIPSX_DEBUG = { S, importLog, refreshIndex, showNotice, prepareBatch, approve, discard, render, progressCsv, nextBatch, lookupSpecific, downloadFound, downloadOpenTopic };
 
   document.documentElement.appendChild(host);
-  load().then(async () => { await restoreKept(); if (!S.settings.user) await detectUserFallback(); await saveSettings(); render(); autoCheckOnLoad(); });
+  load().then(async () => { await restoreKept(); if (!S.settings.user) await detectUserFallback(); await saveSettings(); readyForPolling = true; render(); autoCheckOnLoad(); });
   // Every time TIPS is opened, reloaded or refreshed (this script runs once per page load): quick "Check new" once the
   // session is known. One search request in the usual case; silent unless something new or updated turns up, which
   // opens the "New in TIPS" popup.
@@ -2078,6 +2109,11 @@
     if (!sessionOK()) return;
     await sleep(1500);   // let the Reader's own first requests go first
     if (busy() || !(S.documents.configured ? S.documents.auto : S.settings.autoCheck)) return;
+    if (S.documents.configured) {
+      // The worker coordinates all tabs and recent checks. If the background connection
+      // is unavailable, retain the existing one-time startup sync.
+      try { const result = await chrome.runtime.sendMessage({ type: 'library-poll-startup' }); if (result?.handled) return; } catch (_) {}
+    }
     try { const r = await refreshIndex(false, true); if (!S.documents.configured && r && r.items && r.items.length && !busy()) showNotice(r); }
     catch (e) { console.warn('TIPS Exporter: check when TIPS loaded failed –', e.message); }
   }

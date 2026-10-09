@@ -17,7 +17,9 @@
     <p id="documents-location">Reading settings…</p><p id="documents-status" role="status" aria-live="polite"></p>
     <button id="choose-documents" class="primary" disabled>Choose documents folder…</button><p id="selected-documents" class="hint">Select the parent containing your document folders (LI/GI), including any batch subfolders.</p>
     <label for="documents-attachments">Attachment subfolder inside each document</label><input id="documents-attachments" value="Attachments and Links" spellcheck="false" autocomplete="off">
-    <label class="check"><input type="checkbox" id="documents-auto" checked> Automatically sync when TIPS opens</label>
+    <label class="check"><input type="checkbox" id="documents-auto" checked> Automatically sync</label>
+    <label for="documents-poll-minutes">Check every (minutes)</label><input type="number" id="documents-poll-minutes" min="1" max="1440" step="1" value="10">
+    <p class="hint">Default: 10 minutes. Checks run when TIPS opens and repeat while a logged-in TIPS tab stays open, including in the background. Busy downloads are skipped until a later check. Turning off automatic sync pauses the schedule.</p>
     <p class="hint">Manual and automatic updates request only indexed changes and missing files. Complete, unchanged documents are skipped. Older PDFs and attachments stay; changed files get versioned names. Use the Library screen to choose whether to download indexed documents missing from the folder.</p>
     <div class="buttons"><button id="use-documents" class="primary" disabled>Use this documents folder</button><button id="save-documents" disabled>Save folder settings</button><button id="allow-documents" disabled>Allow documents access</button><button id="disconnect-documents" disabled>Disconnect documents</button></div>
     <p class="hint">In TIPS Exporter → Library, use Scan &amp; verify for a local check against the loaded index. Sync now checks recent index changes, then saves the selected changes and gaps. Attachments are fetched only for changed or incomplete documents; an unchanged archive needs no TIPS requests during a folder update.</p>

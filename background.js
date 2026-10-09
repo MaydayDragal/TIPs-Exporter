@@ -1,4 +1,5 @@
-importScripts('index-csv.js', 'index-folder.js', 'folder-db.js', 'index-background.js', 'documents-client.js', 'documents-folder.js', 'documents-background.js');
+importScripts('index-csv.js', 'index-folder.js', 'folder-db.js', 'index-background.js', 'documents-client.js', 'documents-folder.js', 'documents-background.js', 'library-polling.js');
+TIPSLibraryPolling.create({ chrome, db: TIPSFolderDB }).start();
 
 // Toolbar icon: open/close the exporter drawer on the TIPS Reader tab.
 const READER = 'https://xentry.mercedes-benz.com/tips-reader/';

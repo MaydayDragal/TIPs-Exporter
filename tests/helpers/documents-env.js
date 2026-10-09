@@ -54,7 +54,7 @@ async function content(e, fetchHook, { startAuto = false, section = 'advanced' }
   Object.defineProperty(w.crypto, 'subtle', { value: webcrypto.subtle });
   w.URL.createObjectURL = b => { downloads.push(b); return 'blob:test'; }; w.URL.revokeObjectURL = () => {}; w.HTMLAnchorElement.prototype.click = () => {};
   let listener; const storageListeners = [];
-  e.tabs.set(1, m => new Promise(resolve => { const keep = listener?.(m, null, resolve); if (!keep && !listener) resolve({ locked: true }); }));
+  e.tabs.set(1, m => new Promise(resolve => { const keep = listener?.(m, {id:e.chrome.runtime.id}, resolve); if (!keep && !listener) resolve({ locked: true }); }));
   w.chrome = { storage: { ...e.chrome.storage, onChanged: { addListener: fn => { storageListeners.push(fn); e.chrome.storage.onChanged.addListener(fn); } } }, runtime: { ...e.chrome.runtime, sendMessage: m => e.send(m.action, m), onMessage: { addListener: fn => { listener = fn; } } } };
   const json = value => ({ ok: true, status: 200, json: async () => value });
   const binary = value => ({ ok: true, status: 200, arrayBuffer: async () => (typeof value === 'string' ? new TextEncoder().encode(value) : Uint8Array.from(value)).buffer });

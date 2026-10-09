@@ -1,12 +1,13 @@
 {
   "manifest_version": 3,
   "name": "TIPS Exporter",
-  "version": "1.18.0",
+  "version": "1.19.0",
   "minimum_chrome_version": "111",
   "description": "Keep local XENTRY TIPS LIs and attachments updated, preserve older files, and scrub user IDs and download dates from new PDFs.",
   "permissions": [
     "storage",
-    "unlimitedStorage"
+    "unlimitedStorage",
+    "alarms"
   ],
   "host_permissions": [
     "https://xentry.mercedes-benz.com/*"
