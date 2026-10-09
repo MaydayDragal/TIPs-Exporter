@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "TIPS Exporter",
-  "version": "1.16.1",
+  "version": "1.16.2",
   "minimum_chrome_version": "111",
   "description": "Export XENTRY TIPS PDFs and attachments; verify and update saved TIPS folders, preserve older files, and scrub PDFs locally.",
   "permissions": [

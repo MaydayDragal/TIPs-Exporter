@@ -1,4 +1,4 @@
-/* JSON-safe bounded transfers, automatic-update selection and the human-readable audit export. */
+/* JSON-safe bounded transfers, incremental-update selection and the human-readable audit export. */
 (function (root, factory) {
   const api = factory(); if (typeof module === 'object' && module.exports) module.exports = api; else root.TIPSDocumentsClient = api;
 })(globalThis, () => {
@@ -15,13 +15,23 @@
     }
     check(); return send('finish', { token, upload: started.upload });
   }
-  function needsUpdate(topic, index, policy) {
+  function needsAttachments(topic, index) {
     if (!index) return false;
-    const last = topic.last;
-    if (!last?.ok || last.version < +index.version || last.policy !== policy || topic.missingAttachments.length) return true;
-    // A manual update may have discovered a newer version than the loaded CSV.
-    if (last.version === +index.version && last.mdate !== String(index.mdate || '')) return true;
-    for (let v = 1; v <= +index.version; v++) if (!topic.versions.includes(v) && !last.unavailable?.includes(v)) return true;
+    const last = topic.last, known = last || topic.baseline;
+    if (topic.create || last?.ok === false || topic.missingAttachments.length) return true;
+    if (known && +known.version < +index.version) return true;
+    // The loaded index is the source of change evidence. Do not recheck an archive
+    // just because it predates attachment tracking or the scrub rules changed.
+    const time = value => !value || value === '0' ? NaN : /^\d+$/.test(String(value)) ? +value : Date.parse(value);
+    const baselineDate = +topic.baseline?.version === +known?.version ? topic.baseline?.mdate : null;
+    const since = Number.isFinite(time(known?.mdate)) ? time(known.mdate) : time(baselineDate);
+    if (known && +known.version === +index.version && time(index.mdate) > since) return true;
+    return !topic.versions.includes(+index.version) && !last?.unavailable?.includes(+index.version);
+  }
+  function needsUpdate(topic, index) {
+    if (!index) return false;
+    if (needsAttachments(topic, index)) return true;
+    for (let v = 1; v <= +index.version; v++) if (!topic.versions.includes(v) && !topic.last?.unavailable?.includes(v)) return true;
     return false;
   }
   function csv(inventory) {
@@ -32,5 +42,5 @@
     for (const issue of inventory.issues) rows.push(['# Scan issue',issue]);
     return rows.map(r => r.map(cell).join(',')).join('\r\n') + '\r\n';
   }
-  return { write, needsUpdate, csv };
+  return { write, needsUpdate, needsAttachments, csv };
 });

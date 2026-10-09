@@ -35,6 +35,7 @@
       }
       if (!reader) throw Error('Open TIPS Reader to update saved documents.');
       const owner = sender.tab.id, token = m.token;
+      if (m.action === 'observe-index') return { ok: true, ...await repo.observeIndex(m.snapshot) };
       if (m.action === 'start') { await recover(); return { ok: true, ...await repo.start(token, owner, m.snapshot, m.options) }; }
       if (m.action === 'begin') return { ok: true, ...await repo.begin(token, owner, m.file) };
       if (m.action === 'chunk') return { ok: true, ...await repo.chunk(token, owner, m.upload, m.offset, m.data) };

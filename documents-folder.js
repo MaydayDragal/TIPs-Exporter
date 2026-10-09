@@ -60,6 +60,24 @@
       try { await u.stream.abort(); } catch (_) {}
     }
     async function abandon() { for (const u of uploads.values()) await abortUpload(u); uploads.clear(); await cleanupPending(); await db.del(RUN); }
+    async function rememberIndex(r, snapshot = {}) {
+      if (!r) return;
+      r.baseline ||= {}; let changed = false;
+      const dated = value => !!value && value !== '0' && Number.isFinite(/^\d+$/.test(String(value)) ? +value : Date.parse(value));
+      for (const x of snapshot.index || []) {
+        const tips = String(x.tips || '').toUpperCase(), version = +x.version;
+        if (!DOCUMENT_NO.test(tips) || !Number.isSafeInteger(version) || version < 1 || version > 10000) continue;
+        const previous = r.baseline[tips], last = r.progress?.[tips];
+        // Old logs may omit dates. Learn the first known date locally, then keep
+        // that comparison point so later same-version edits remain detectable.
+        const learnDate = dated(x.mdate) && ((previous?.version === version && !dated(previous.mdate)) ||
+          (+last?.version === version && !dated(last.mdate) && (previous?.version !== version || !dated(previous.mdate))));
+        if (previous && !learnDate) continue;
+        // This is an offline comparison point, never a claim that attachments were verified.
+        r.baseline[tips] = { version, mdate: String(x.mdate || '') }; changed = true;
+      }
+      if (changed) await db.put(KEY, r);
+    }
     async function scan(r, snapshot = {}) {
       const found = new Map(), issues = []; let visited = 0;
       async function walk(d, path, depth) {
@@ -79,7 +97,7 @@
           if (attachmentHandle) for await (const f of attachmentHandle.values()) if (f.kind === 'file') { if (++visited > 100000) throw Error('Folder scan exceeded 100,000 entries.'); const file = await f.getFile(); attachments.push({ name: f.name, size: file.size }); }
           const last = r.progress?.[tips] || null;
           const missingAttachments = (last?.files || []).filter(f => !attachments.some(a => a.name.toLowerCase() === f.name.toLowerCase() && a.size === f.size)).map(f => f.name);
-          topic = { tips, path, versions: [...new Set(versions)].sort((a,b) => a-b), invalid: [...new Set(invalid)].sort((a,b) => a-b), attachments: attachments.length, missingAttachments, notes, last };
+          topic = { tips, path, versions: [...new Set(versions)].sort((a,b) => a-b), invalid: [...new Set(invalid)].sort((a,b) => a-b), attachments: attachments.length, missingAttachments, notes, last, baseline: r.baseline?.[tips] || null };
           if (!found.has(tips)) found.set(tips, []); found.get(tips).push(topic);
         }
         if (!path && tips && pdfIds.length) throw Error('Select the parent containing the document folders, not an individual document folder.');
@@ -118,7 +136,7 @@
         rows.push({ tips, title: '', indexedVersion: null, indexStatus: 'not in index', folderStatus: matches.length > 1 ? 'duplicate' : matches[0].ambiguous ? 'ambiguous' : 'not in index', path: matches.map(f => f.path).join(' | '), versions: matches[0].versions, missing: [], invalid: matches[0].invalid, attachments: matches[0].attachments, missingAttachments: matches[0].missingAttachments, notes: matches[0].notes });
       }
       return { rows, summary, issues, at: now(), topics: [...found.values()].filter(a => a.length === 1 && !a[0].ambiguous).map(a => a[0]),
-        attachmentNote: 'The index log lists PDF versions, not attachment filenames. Previously tracked attachments are checked locally; current attachment completeness is checked against live TIPS during an update.' };
+        attachmentNote: 'The index log lists PDF versions, not attachment filenames. Previously tracked attachments are checked locally. Live TIPS attachments are fetched only for documents with indexed changes, a missing current PDF, missing tracked attachments, or an interrupted update. Untracked attachments are not verified by this scan.' };
     }
     async function remember(run, tips, item) { run.fileRecords ||= {}; const a = run.fileRecords[tips] ||= []; const old = a.findIndex(x => x.name.toLowerCase() === item.name.toLowerCase()); if (old >= 0) a.splice(old, 1); a.push(item); await db.put(RUN, run); }
     return {
@@ -136,11 +154,13 @@
       status: () => queue(async () => await db.get(STATUS) || emit(await db.get(KEY))),
       active: () => queue(() => db.get(RUN)),
       abandon: () => queue(abandon),
-      inventory: snapshot => queue(async () => { const r = await current(); await cleanupPending(); const inventory = await scan(r, snapshot); await emit(r, 'ready', 'Folder scanned against the index. See the inventory for missing or invalid files.', { inventory: inventory.summary }); return inventory; }),
+      observeIndex: snapshot => queue(async () => { await rememberIndex(await db.get(KEY), snapshot); return { remembered: true }; }),
+      inventory: snapshot => queue(async () => { const r = await current(); await cleanupPending(); await rememberIndex(r, snapshot); const inventory = await scan(r, snapshot); await emit(r, 'ready', 'Folder scanned against the index. See the inventory for missing or invalid files.', { inventory: inventory.summary }); return inventory; }),
       start: (token, owner, snapshot, options = {}) => queue(async () => {
         if (!/^[\w-]{1,80}$/.test(token) || !Number.isInteger(owner)) throw Error('Invalid update owner or token.');
         if (await db.get(RUN)) throw Error('A documents folder update is already running in another tab.');
-        const r = await current(); await cleanupPending(); const inventory = await scan(r, snapshot), topics = inventory.topics.map(t => ({ ...t, create: false }));
+        const r = await current(); await cleanupPending(); await rememberIndex(r, snapshot);
+        const inventory = await scan(r, snapshot), topics = inventory.topics.map(t => ({ ...t, create: false }));
         if (options.includeMissing && !options.auto) for (const x of snapshot.index || []) if (inventory.rows.find(a => a.tips === x.tips.toUpperCase())?.folderStatus === 'missing') topics.push({ tips: x.tips.toUpperCase(), path: topicFolder(x), versions: [], invalid: [], missingAttachments: [], notes: [], create: true, last: null });
         await db.put(RUN, { token, owner, epoch: r.epoch, topics, fileRecords: {} }); await emit(r, 'running', 'Updating saved documents…'); return { token, topics, inventory };
       }),

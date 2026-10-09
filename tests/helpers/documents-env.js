@@ -18,7 +18,7 @@ function worker() {
   const chrome = { runtime: { id: 'test-extension', getURL: p => 'chrome-extension://test-extension/' + p,
     getManifest: () => ({ version: '1.16.0' }), onMessage: { addListener: fn => listeners.push(fn) }, openOptionsPage: async () => {} },
     storage: { local: { get: async keys => structuredClone(typeof keys === 'string' ? { [keys]: state[keys] } : Object.fromEntries(keys.map(k => [k, state[k]]))),
-      set: async values => { const c = {}; for (const k of Object.keys(values)) c[k] = { oldValue: state[k], newValue: values[k] }; Object.assign(state, structuredClone(values)); changes.forEach(fn => fn(c, 'local')); } }, onChanged: { addListener: fn => changes.push(fn) } },
+      set: async values => { const c = {}; for (const k of Object.keys(values)) c[k] = { oldValue: state[k], newValue: values[k] }; Object.assign(state, structuredClone(values)); changes.forEach(fn => fn(c, 'local')); } }, onChanged: { addListener: fn => changes.push(fn), removeListener: fn => { const i = changes.indexOf(fn); if (i >= 0) changes.splice(i, 1); } } },
     tabs: { query: async () => [...tabs.keys()].map(id => ({ id })), sendMessage: async (id, m) => { if (!tabs.has(id)) throw Error('No receiver'); return tabs.get(id)(m); } }
   };
   const context = { chrome, TIPSFolderDB: db, TIPSIndexFolder: require('../../index-folder'), TIPSIndexCsv: require('../../index-csv'),
@@ -48,9 +48,9 @@ async function content(e, fetchHook) {
   Object.assign(w, { TextEncoder, TextDecoder, Blob, Response, CompressionStream, indexedDB: new IDBFactory() });
   Object.defineProperty(w.crypto, 'subtle', { value: webcrypto.subtle });
   w.URL.createObjectURL = b => { downloads.push(b); return 'blob:test'; }; w.URL.revokeObjectURL = () => {}; w.HTMLAnchorElement.prototype.click = () => {};
-  let listener;
+  let listener; const storageListeners = [];
   e.tabs.set(1, m => new Promise(resolve => { const keep = listener?.(m, null, resolve); if (!keep && !listener) resolve({ locked: true }); }));
-  w.chrome = { storage: e.chrome.storage, runtime: { ...e.chrome.runtime, sendMessage: m => e.send(m.action, m), onMessage: { addListener: fn => { listener = fn; } } } };
+  w.chrome = { storage: { ...e.chrome.storage, onChanged: { addListener: fn => { storageListeners.push(fn); e.chrome.storage.onChanged.addListener(fn); } } }, runtime: { ...e.chrome.runtime, sendMessage: m => e.send(m.action, m), onMessage: { addListener: fn => { listener = fn; } } } };
   const json = value => ({ ok: true, status: 200, json: async () => value });
   const binary = value => ({ ok: true, status: 200, arrayBuffer: async () => (typeof value === 'string' ? new TextEncoder().encode(value) : Uint8Array.from(value)).buffer });
   w.fetch = async (url, options) => {
@@ -67,6 +67,6 @@ async function content(e, fetchHook) {
   await until(() => listener); await tick(100); listener({ type: 'toggle' }, null, () => {});
   const root = () => [...w.document.documentElement.children].find(n => n.shadowRoot)?.shadowRoot;
   const $ = id => root()?.getElementById(id); await until(() => $('tobulk')); $('tobulk').click();
-  return { w, dom, $, root, active, requests, downloads, close: () => { e.tabs.delete(1); observers.forEach(o => o.disconnect()); dom.window.close(); } };
+  return { w, dom, $, root, active, requests, downloads, close: () => { e.tabs.delete(1); observers.forEach(o => o.disconnect()); storageListeners.forEach(fn => e.chrome.storage.onChanged.removeListener(fn)); dom.window.close(); } };
 }
 module.exports = { ROOT, LI, TOPIC, ITEM, pdf, tick, until, worker, connected, content, directory, JSDOM };

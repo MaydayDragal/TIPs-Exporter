@@ -414,6 +414,9 @@
     }
     S.checking = true; let checked = false; render();
     try {
+      // Remember the previous index locally before Check new changes dates/versions.
+      // A complete pre-existing archive needs no online initialization sweep.
+      if (S.documents.configured) await documentsRequest('observe-index', { snapshot: documentsSnapshot() });
       const byId = new Map(S.index.map(x => [String(x.tipsId), x]));
       const ni = full ? { max: NaN, bad: [] } : newestIndexed(), since = ni.max;
       if (!auto) setMsg(full ? 'Checking every topic for new or updated ones…' : 'Checking the newest topics…');
@@ -486,29 +489,31 @@
     const run = { token: crypto.randomUUID(), cancel: false, label: 'Scanning saved documents…', i: 0, total: 0 };
     // The owner must answer recovery probes even before start returns its lease.
     S.documentRun = run; S.documentResult = ''; render();
-    const policy = pdfScrubPolicy(), policyKey = JSON.stringify(policy), summary = { topics: 0, pdfs: 0, attachments: 0, skipped: 0, errors: [] };
+    const policy = pdfScrubPolicy(), policyKey = JSON.stringify(policy), summary = { topics: 0, pdfs: 0, attachments: 0, skipped: 0, skippedTopics: 0, errors: [] };
     let started = false;
     const check = () => { if (run.cancel) throw Error('Folder update stopped.'); };
     try {
       const planned = await documentsRequest('start', { token: run.token, snapshot: documentsSnapshot(), options: { auto, includeMissing: !auto && S.documentsIncludeMissing } });
       started = true; S.documentInventory = planned.inventory;
-      const topics = auto ? planned.topics.filter(t => client.needsUpdate(t, S.index.find(x => x.tips.toUpperCase() === t.tips), policyKey)) : planned.topics;
+      const indexed = new Map(S.index.map(x => [x.tips.toUpperCase(), x]));
+      const eligible = planned.topics.filter(t => indexed.has(t.tips));
+      const topics = eligible.filter(t => client.needsUpdate(t, indexed.get(t.tips)));
+      summary.skippedTopics = eligible.length - topics.length;
       run.total = topics.length;
       for (const topic of topics) {
-        check(); run.i++; run.label = `${topic.tips} · ${run.i}/${run.total}`; render();
-        // Persist retry intent before search, fetch, scrubbing or writing can fail/stop.
+        check(); run.i++; run.label = `${topic.tips} · ${run.i}/${run.total} selected for update`; render();
+        // Persist retry intent before fetching, scrubbing or writing can fail/stop.
         await documentsRequest('topic-start', { token: run.token, tips: topic.tips });
-        const item = await searchByNumber(topic.tips); check();
-        if (!item) { summary.errors.push(`${topic.tips}: not found in live TIPS search.`); continue; }
+        const item = { ...indexed.get(topic.tips), tips: topic.tips }; check();
         const files = [], errors = [];
-        item.opts = { documentFolder: true, existingVersions: topic.versions, att: true };
+        item.opts = { documentFolder: true, existingVersions: [...topic.versions, ...(topic.last?.unavailable || [])], att: client.needsAttachments(topic, item) };
         let stats;
         try {
-          stats = await exportDoc(item, files, errors, label => { check(); run.label = `${topic.tips} · ${run.i}/${run.total} · ${label}`; render(); }, policy);
+          stats = await exportDoc(item, files, errors, label => { check(); run.label = `${topic.tips} · ${run.i}/${run.total} selected · ${label}`; render(); }, policy);
         } catch (e) {
           if (run.cancel || e instanceof SessionError) throw e;
           summary.errors.push(`${topic.tips}: ${e.message}`);
-          await documentsRequest('topic-done', { token: run.token, result: { tips: topic.tips, version: item.version, mdate: item.mdate, policy: policyKey, ok: false } });
+          await documentsRequest('topic-done', { token: run.token, result: { tips: topic.tips, version: item.version, mdate: item.mdate, policy: policyKey, ok: false, unavailable: topic.last?.unavailable || [] } });
           continue;
         }
         check();
@@ -518,7 +523,7 @@
           const saved = await client.write(documentsRequest, run.token, topic.tips, stats.version, { path, data: file.data }, () => run.cancel);
           if (saved.skip) summary.skipped++; else if (saved.kind === 'pdf') summary.pdfs++; else summary.attachments++;
         }
-        const unavailable = errors.map(e => /: v(\d+) (?:not available in TIPS|PDF HTTP 404)/.exec(e)).filter(Boolean).map(m => +m[1]);
+        const unavailable = [...new Set([...(topic.last?.unavailable || []), ...errors.map(e => /: v(\d+) (?:not available in TIPS|PDF HTTP 404)/.exec(e)).filter(Boolean).map(m => +m[1])])];
         const hard = errors.filter(e => !/: v\d+ (?:not available in TIPS|PDF HTTP 404)/.test(e));
         const currentSaved = topic.versions.includes(+stats.version) || files.some(f => f.name.endsWith(`/${item.tips}_v${stats.version}.pdf`));
         if (!currentSaved && !hard.length) hard.push(`${topic.tips}: latest PDF was not saved.`);
@@ -534,7 +539,8 @@
         try { await documentsRequest('end', { token: run.token, summary }); }
         catch (e) { summary.errors.push(e.message); }
       }
-      S.documentResult = run.cancel ? 'Update stopped. Completed files were kept.' : `${summary.topics} document(s) checked · ${summary.pdfs} PDF(s) and ${summary.attachments} attachment(s) added · ${summary.skipped} unchanged file(s) skipped.`;
+      S.documentResult = run.cancel ? 'Update stopped. Completed files were kept.' : started && !run.total ? 'No documents selected for download. No TIPS requests made. See the inventory for any unresolved discrepancies.' : `${summary.topics} document(s) processed · ${summary.pdfs} PDF(s) and ${summary.attachments} attachment(s) added · ${summary.skipped} unchanged file(s) skipped.`;
+      if (summary.skippedTopics) S.documentResult += ` ${summary.skippedTopics} unchanged document(s) skipped without TIPS requests.`;
       if (summary.errors.length) S.documentResult += ` ${summary.errors.length} issue(s):\n` + summary.errors.slice(0, 100).join('\n');
       if (started) {
         try { S.documentInventory = (await documentsRequest('inventory', { snapshot: documentsSnapshot() })).inventory; }
@@ -1247,6 +1253,7 @@
     return `<div class="sec" style="border-top:1px solid var(--div);padding-top:16px"><h3>Saved documents</h3>
       <span class="mut">${esc(s.configured ? s.folderName + ' / [document folder] / ' + s.attachmentFolder : 'Choose your documents folder in Settings to inventory and update saved LI/GI documents.')}</span>
       <span class="mut sm">${s.configured && s.auto ? 'Automatic updates after Check new are on. ' : ''}Older PDFs and attachments are kept. Changed attachments get versioned names.</span>
+      <span class="mut sm">Updates request only indexed changes and missing files. Complete, unchanged documents are skipped. Use Check new to refresh the index first.</span>
       <div class="grid2"><button class="b bar" id="doc_scan" ${disabled ? 'disabled' : ''}>Scan &amp; verify</button><button class="b pri" id="doc_update" ${disabled ? 'disabled' : ''}>Update saved documents</button></div>
       <label class="ck"><input type="checkbox" id="doc_missing" ${S.documentsIncludeMissing ? 'checked' : ''} ${disabled ? 'disabled' : ''}> Include missing documents from index in a manual update</label>
       <button class="b bar sm" id="doc_folder" ${busy() || S.checking ? 'disabled' : ''}>Choose / change documents folder…</button>

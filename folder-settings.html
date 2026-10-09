@@ -18,9 +18,9 @@
     <button id="choose-documents" class="primary" disabled>Choose documents folder…</button><p id="selected-documents" class="hint">Select the parent containing your document folders (LI/GI), including any batch subfolders.</p>
     <label for="documents-attachments">Attachment subfolder inside each document</label><input id="documents-attachments" value="Attachments and Links" spellcheck="false" autocomplete="off">
     <label class="check"><input type="checkbox" id="documents-auto" checked> Update saved documents automatically after Check new</label>
-    <p class="hint">New PDF versions are added beside saved versions. Older attachments stay; changed files get versioned names. Automatic updates only cover document folders already present.</p>
+    <p class="hint">Manual and automatic updates request only indexed changes and missing files. Complete, unchanged documents are skipped. Older PDFs and attachments stay; changed files get versioned names. Automatic updates only cover document folders already present.</p>
     <div class="buttons"><button id="use-documents" class="primary" disabled>Use this documents folder</button><button id="save-documents" disabled>Save folder settings</button><button id="allow-documents" disabled>Allow documents access</button><button id="disconnect-documents" disabled>Disconnect documents</button></div>
-    <p class="hint">In TIPS → Bulk export, use Scan &amp; verify to compare the folder with the loaded index log, or Update saved documents to fetch missing versions and current attachments. The index log has no attachment manifest; attachments are checked against live TIPS during updates.</p>
+    <p class="hint">In TIPS → Bulk export, use Scan &amp; verify for a local check against the loaded index. Use Check new to refresh the index, then Update saved documents for the selected changes and gaps. Attachments are fetched only for changed or incomplete documents; an unchanged archive needs no TIPS requests during a folder update.</p>
     <p id="documents-result" role="status" aria-live="polite"></p>
   </section>
   <footer>Index changes and approved batch progress are saved automatically. Folder updates write directly into the documents folder; ZIP downloads use your browser's download location. Chrome may ask you to allow access again after restarting or installing another copy.</footer>

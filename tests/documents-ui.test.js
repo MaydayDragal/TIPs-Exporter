@@ -149,9 +149,11 @@ async function update(c, e) { c.$('doc_update').click(); await until(() => e.mes
     const e = await connected({ auto: true }), c = await content(e);
     try {
       await update(c, e); c.active.attachment = 'revision after success'; e.d.state.failClose = true; e.messages.length = 0;
+      const folder = await (await e.d.getDirectoryHandle('Batch 001')).getDirectoryHandle(`${LI} - Old title (Requested)`);
+      await (await folder.getDirectoryHandle('Attachments and Links')).removeEntry('photo (v5).jpg');
       await update(c, e); assert.equal((await e.db.get('documentsConnection')).progress[LI].ok, false);
       e.d.state.failClose = false; e.messages.length = 0; c.$('refresh').click(); await until(() => e.messages.some(m => m.action === 'end')); await until(() => !c.$('doc_update').disabled);
-      assert.equal(await e.d.read(`${TOPIC}/Attachments and Links/photo (v5-2).jpg`), 'revision after success');
+      assert.equal(await e.d.read(`${TOPIC}/Attachments and Links/photo (v5).jpg`), 'revision after success');
       assert.equal((await e.db.get('documentsConnection')).progress[LI].ok, true);
     } finally { c.close(); }
   });
@@ -159,7 +161,10 @@ async function update(c, e) { c.$('doc_update').click(); await until(() => e.mes
     const e = await connected({ auto: true }); let block = false, release;
     const c = await content(e, async (u, _o, h) => block && u === 'https://files.test/photo' ? new Promise(resolve => { release = () => resolve(h.binary('next revision')); }) : null);
     try {
-      await update(c, e); block = true; e.messages.length = 0; c.$('doc_update').click(); await until(() => release);
+      await update(c, e);
+      const folder = await (await e.d.getDirectoryHandle('Batch 001')).getDirectoryHandle(`${LI} - Old title (Requested)`);
+      await (await folder.getDirectoryHandle('Attachments and Links')).removeEntry('photo (v5).jpg');
+      block = true; e.messages.length = 0; c.$('doc_update').click(); await until(() => release);
       assert.equal((await e.db.get('documentsConnection')).progress[LI].ok, false);
       c.$('doc_stop').click(); release(); await until(() => !c.$('doc_update').disabled);
       assert.equal((await e.db.get('documentsConnection')).progress[LI].ok, false); assert.equal(e.data.has('documentsRun'), false);
