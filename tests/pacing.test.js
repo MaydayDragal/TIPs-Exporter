@@ -36,8 +36,7 @@ function makeEnv(settings, extra = {}) {
   w.fetch = fakeFetch;
   const pm = w.postMessage.bind(w);
   w.postMessage = (d, o) => { if (d && d.__tipsx) setTimeout(() => w.dispatchEvent(new w.MessageEvent('message', { data: d, source: w })), 0); else pm(d, o); };
-  // These legacy endpoint fixtures use zero-filled dummy PDFs; real scrubbing is covered by pdf-scrub.test.js.
-  st.settings = { pdfScrub: { enabled: false }, ...st.settings };
+  require('./helpers/pdf-fixture').installPdfFixtures(w);
   w.eval(probe);
   w.eval(fs.readFileSync(require('path').join(__dirname, '..', 'index-csv.js'), 'utf8')); w.eval(content);
   const env = { w, st, root: () => [...w.document.documentElement.children].find(e => e.shadowRoot).shadowRoot };

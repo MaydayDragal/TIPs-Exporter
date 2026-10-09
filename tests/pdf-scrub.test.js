@@ -158,12 +158,12 @@ async function env(pdf, { scrub, missingEngine = false, idb = new IDBFactory(), 
       assert(/PDF scrub failed/.test(new TextDecoder().decode(files.get('_errors.txt'))));
     } finally { e.close(); }
   });
-  await test('disabled scrubbing preserves PDF bytes exactly', async () => {
+  await test('old disabled preference cannot bypass required PDF cleanup', async () => {
     const e = await env(original, { scrub: { enabled: false } });
-    try { const files = await e.download(); for (const [n, b] of files) if (/\.pdf$/i.test(n)) assert.deepEqual(b, new Uint8Array(original)); }
+    try { const files = await e.download(); for (const [n, b] of files) if (/\.pdf$/i.test(n)) await assertClean(b); }
     finally { e.close(); }
   });
-  await test('settings persist custom rules and timestamp/user toggles, including after re-render', async () => {
+  await test('custom and optional user rules persist while required timestamps stay enabled', async () => {
     const e = await env(original);
     try {
       e.$('gear').click();
@@ -173,16 +173,16 @@ async function env(pdf, { scrub, missingEngine = false, idb = new IDBFactory(), 
       assert.equal(e.$('s_pdfStrings').value, 'CUSTOM, SECOND\nTHIRD');
       e.$('s_pdfUser').click(); e.$('s_save').click(); await tick(30);
       assert.equal(e.st.settings.pdfScrub.strings, 'CUSTOM, SECOND\nTHIRD');
-      assert.equal(e.st.settings.pdfScrub.timestamp, false); assert.equal(e.st.settings.pdfScrub.user, false);
+      assert.equal(e.st.settings.pdfScrub.timestamp, true); assert.equal(e.st.settings.pdfScrub.user, false);
     } finally { e.close(); }
   });
-  await test('metadata-only mode retains page text and removes Info, XMP and file ID', async () => {
+  await test('optional user cleanup can be disabled while fixed ID, timestamp and metadata cleanup remains', async () => {
     const e = await env(original, { scrub: { enabled: true, user: false, timestamp: false, strings: '' } });
     try {
       const files = await e.download(), { d, streams } = await inspect([...files].find(([n]) => /_v2\.pdf$/.test(n))[1]);
       assert.equal(d.context.trailerInfo.Info, undefined); assert.equal(d.context.trailerInfo.ID, undefined);
       assert.equal(d.catalog.get(PDFName.of('Metadata')), undefined);
-      assert(streams.includes('AUTOUSER') && streams.includes('02-10-2026'));
+      assert(streams.includes('AUTOUSER')); assert(!streams.includes('02-10-2026')); assert(!streams.includes('D7MASALL') && !streams.includes('44374D4153414C4C'));
     } finally { e.close(); }
   });
   await test('session interruption resumes through the same PDF scrub path', async () => {
@@ -225,6 +225,9 @@ async function env(pdf, { scrub, missingEngine = false, idb = new IDBFactory(), 
     const e = await env(original, { scrub: { enabled: false } });
     try {
       e.$('tobulk').click(); e.$('prep').click(); await until(() => e.$('approve')); await tick(50);
+      // Model a ZIP cached by an earlier extension, with the pre-mandatory policy.
+      const db = await new Promise((resolve,reject)=>{const q=e.idb.open('tips-exporter',1);q.onsuccess=()=>resolve(q.result);q.onerror=()=>reject(q.error);});
+      await new Promise((resolve,reject)=>{const tx=db.transaction('kv','readwrite'),kv=tx.objectStore('kv'),q=kv.get('pending');q.onsuccess=()=>kv.put({...q.result,pdfPolicy:{enabled:false}},'pending');tx.oncomplete=resolve;tx.onerror=()=>reject(tx.error);}); db.close();
       const state = structuredClone(e.st); delete state.settings.pdfScrub;
       const restored = await env(original, { idb: e.idb, state });
       assert(!restored.$('approve')); assert.equal(restored.saved.length, 0);

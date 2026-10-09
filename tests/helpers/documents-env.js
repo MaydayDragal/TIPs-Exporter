@@ -3,6 +3,7 @@ const { webcrypto } = require('node:crypto');
 const { JSDOM } = require('jsdom');
 const { IDBFactory } = require('fake-indexeddb');
 const { directory } = require('./memory-fs');
+const { makePdf, assertSavedPdf } = require('./pdf-fixture');
 globalThis.crypto ||= webcrypto;
 const ROOT = path.join(__dirname, '../..');
 const LI = 'LI00.00-P-066047', TOPIC = `Batch 001/${LI} - Old title (Requested)`;
@@ -40,7 +41,11 @@ async function connected(options = {}) {
   const r = await e.send('connect', { token: 'first', options: { auto: false, ...options } }, 'options');
   if (!r.ok) throw Error(r.error); return { ...e, d };
 }
-async function content(e, fetchHook) {
+async function content(e, fetchHook, { startAuto = false, section = 'advanced' } = {}) {
+  // Most document tests explicitly initiate updates. Enable on-load automation only
+  // in tests that exercise it; restore the user's auto choice once this tab is loaded.
+  const configuredAuto = e.state.documentsFolder?.auto;
+  if (!startAuto && configuredAuto) e.state.documentsFolder.auto = false;
   const dom = new JSDOM('<!doctype html><body>TIPS Reader v1.22.0 - 2026</body>', { url: 'https://xentry.mercedes-benz.com/tips-reader/search/topics', runScripts: 'outside-only', pretendToBeVisual: true });
   const w = dom.window, downloads = [], requests = [], active = { version: 5, attachment: 'new photo', mdate: ITEM.mdate };
   const observers = [], Observer = w.MutationObserver;
@@ -57,7 +62,7 @@ async function content(e, fetchHook) {
     const u = String(url); requests.push(u);
     const custom = await fetchHook?.(u, options, { active, binary, json }); if (custom) return custom;
     if (options?.method === 'POST') return json({ hits: [{ ...ITEM, version: active.version, modificationDate: active.mdate }], totalHits: 1 });
-    if (u.includes('/file/topics/')) return binary(pdf(+u.match(/\/file\/topics\/101\/(\d+)/)[1]));
+    if (u.includes('/file/topics/')) return binary(await makePdf('version ' + +u.match(/\/file\/topics\/101\/(\d+)/)[1]));
     if (u.includes('/topics/101/')) return json({ version: active.version, attachments: [{ filename: 'photo.jpg', dataUrl: 'https://attachments.test/?readKey=one' }], references: [], history: { children: [] } });
     if (u.includes('/read/download/url')) return json({ url: 'https://files.test/photo' });
     if (u === 'https://files.test/photo') return binary(active.attachment);
@@ -66,7 +71,9 @@ async function content(e, fetchHook) {
   for (const f of ['vendor/pdf-lib.min.js', 'pdf-scrubber.js', 'index-csv.js', 'documents-client.js', 'content.js']) w.eval(fs.readFileSync(path.join(ROOT, f), 'utf8'));
   await until(() => listener); await tick(100); listener({ type: 'toggle' }, null, () => {});
   const root = () => [...w.document.documentElement.children].find(n => n.shadowRoot)?.shadowRoot;
-  const $ = id => root()?.getElementById(id); await until(() => $('tobulk')); $('tobulk').click();
+  const $ = id => root()?.getElementById(id); await until(() => $('tobulk'));
+  if (!startAuto && configuredAuto) await e.chrome.storage.local.set({documentsFolder:{...e.state.documentsFolder,auto:true}});
+  if (section === 'advanced') $('tobulk').click();
   return { w, dom, $, root, active, requests, downloads, close: () => { e.tabs.delete(1); observers.forEach(o => o.disconnect()); storageListeners.forEach(fn => e.chrome.storage.onChanged.removeListener(fn)); dom.window.close(); } };
 }
-module.exports = { ROOT, LI, TOPIC, ITEM, pdf, tick, until, worker, connected, content, directory, JSDOM };
+module.exports = { ROOT, LI, TOPIC, ITEM, pdf, tick, until, worker, connected, content, directory, JSDOM, makePdf, assertSavedPdf };

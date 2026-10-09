@@ -46,8 +46,7 @@ function makeEnv(settings, extra = {}) {
   w.chrome = { storage: { local: { get: async k => ({ [k]: st[k] }), set: async o => Object.assign(st, o) } }, runtime: { onMessage: { addListener(fn) { w.__toggle = fn; } } } };
   w.confirm = () => true;
   w.fetch = fakeFetch;
-  // These legacy endpoint fixtures use zero-filled dummy PDFs; real scrubbing is covered by pdf-scrub.test.js.
-  st.settings = { pdfScrub: { enabled: false }, ...st.settings };
+  require('./helpers/pdf-fixture').installPdfFixtures(w);
   w.eval(probe); w.eval(fs.readFileSync(require('path').join(__dirname, '..', 'index-csv.js'), 'utf8')); w.eval(content);
   const env = { w, st, saved, root: () => [...w.document.documentElement.children].find(e => e.shadowRoot).shadowRoot };
   env.$ = id => env.root().getElementById(id);
@@ -69,8 +68,9 @@ const index = topics.map(t => ({ tips: t.tips, tipsId: t.tipsId, version: t.vers
   ok(!e.root().querySelector('.dr'), 'closed: nothing floats over the page');
   e.w.__toggle({ type: 'toggle' }, null, () => { }); await tick(50);
   e.shot('1_ready_empty');
-  ok(e.$('look') && e.$('li') && e.$('tobulk'), 'single-LI view is the default, with bulk row');
-  ok(e.$('tosingle').getAttribute('aria-selected') === 'true' && e.$('tobulk'), 'drawer opens on the Single LI tab, Bulk export tab next to it');
+  ok(!e.$('library_panel').hidden && e.$('advanced_panel').hidden, 'drawer opens on the local Library screen');
+  e.$('toadvanced').click();
+  ok(e.$('tosingle').getAttribute('aria-selected') === 'true' && e.$('tobulk'), 'Advanced contains Single LI and Bulk export tabs');
 
   // Look up: full number, unique ending, ambiguous fragment, unknown
   e.type('LI42.10-P-078779, 061245\n0787 999999');

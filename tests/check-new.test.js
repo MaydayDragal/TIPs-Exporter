@@ -46,8 +46,7 @@ function makeEnv(extra = {}, settings = { autoCheck: false }, path = '/tips-read
   w.HTMLAnchorElement.prototype.click = function () { };
   w.chrome = { storage: { local: { get: async k => ({ [k]: st[k] }), set: async o => Object.assign(st, o) } }, runtime: { getManifest: () => ({ version: '1.11.0' }), onMessage: { addListener(fn) { w.__toggle = fn; } } } };
   w.confirm = () => true; w.fetch = fakeFetch;
-  // These legacy endpoint fixtures use zero-filled dummy PDFs; real scrubbing is covered by pdf-scrub.test.js.
-  st.settings = { pdfScrub: { enabled: false }, ...st.settings };
+  require('./helpers/pdf-fixture').installPdfFixtures(w);
   w.eval(probe); w.eval(fs.readFileSync(require('path').join(__dirname, '..', 'index-csv.js'), 'utf8')); w.eval(content);
   const shadows = () => [...w.document.documentElement.children].filter(e => e.shadowRoot).map(e => e.shadowRoot);
   const root = () => shadows().find(r => r.querySelector('.dr')) || shadows()[0];

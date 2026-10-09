@@ -16,8 +16,7 @@ function makeEnv({ fetch, extra = {}, settings = {}, body = '', storeDelay = 0, 
   w.HTMLAnchorElement.prototype.click = function () { saved[saved.length - 1].name = this.download; };
   w.chrome = { storage: { local: { get: async k => ({ [k]: JSON.parse(JSON.stringify(st[k] ?? null)) ?? undefined }), set: async o => { if (storeDelay) await tick(storeDelay); Object.assign(st, JSON.parse(JSON.stringify(o))); } } }, runtime: { getManifest: () => ({ version: 'qa' }), onMessage: { addListener(fn) { w.__toggle = fn; } } } };
   w.confirm = () => true; w.fetch = fetch;
-  // These legacy endpoint fixtures use zero-filled dummy PDFs; real scrubbing is covered by pdf-scrub.test.js.
-  st.settings = { pdfScrub: { enabled: false }, ...st.settings };
+  require('./helpers/pdf-fixture').installPdfFixtures(w);
   w.eval(probe); w.eval(fs.readFileSync(require('path').join(__dirname, '..', 'index-csv.js'), 'utf8')); w.eval(content);
   const shadows = () => [...w.document.documentElement.children].filter(e => e.shadowRoot).map(e => e.shadowRoot);
   const root = () => shadows().find(r => r.querySelector('.dr')) || shadows()[0];
@@ -169,10 +168,10 @@ const ok = (c, m) => { console.log((c ? 'PASS ' : 'FAIL ') + m); if (!c) process
     await tick(900);
     ok(e.root().activeElement && e.root().activeElement.id === 'pause', 'focus stays on Pause while documents advance');
     e.$('gear').click(); await tick(10);
-    const u = e.$('s_user'); u.focus(); u.value = 'abc'; u.dispatchEvent(new e.w.Event('input')); u.setSelectionRange(1, 1);
+    const u = e.$('s_outlet'); u.closest('details').open = true; u.focus(); u.value = 'abc'; u.dispatchEvent(new e.w.Event('input')); u.setSelectionRange(1, 1);
     await tick(900);
     const a = e.root().activeElement;
-    ok(a && a.id === 's_user' && a.value === 'abc' && a.selectionStart === 1, 'focus, value and caret stay in Settings → User while documents advance');
+    ok(a && a.id === 's_outlet' && a.closest('details').open && a.value === 'abc' && a.selectionStart === 1, 'focus, value and caret stay in Settings → Outlet while documents advance');
     e.$('cancel') && e.$('cancel').click();
   }
   {
@@ -191,7 +190,7 @@ const ok = (c, m) => { console.log((c ? 'PASS ' : 'FAIL ') + m); if (!c) process
     await e.open();
     e.type('LI42.10-P-078779'); e.$('look').click(); await waitFor(() => e.$('dlfound'));
     e.$('dlfound').click(); await waitFor(() => /Saved to Downloads/.test(e.text()));
-    const ab = await new Promise(r => { const fr = new e.w.FileReader(); fr.onload = () => r(fr.result); fr.readAsArrayBuffer(e.saved[0].blob); });
+    const ab = await e.saved[0].blob.arrayBuffer();
     const txtz = Buffer.from(ab).toString('latin1');
     ok(/LI42\.10-P-078779 \(Requested\)\/LI42\.10-P-078779_v1\.pdf/.test(txtz) && !/LI42\.10-P-078779 - /.test(txtz), 'empty title: LI number and Requested label without a dangling separator');
   }

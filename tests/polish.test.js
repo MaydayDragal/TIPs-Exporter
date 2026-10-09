@@ -17,8 +17,7 @@ function makeEnv(extra = {}, path = '/tips-reader/search/topics') {
   w.chrome = { storage: { local: { get: async k => ({ [k]: st[k] }), set: async o => Object.assign(st, o) } },
     runtime: { getManifest: () => ({ version: '1.6.1' }), onMessage: { addListener(fn) { w.__toggle = fn; } } } };
   w.confirm = () => true; w.fetch = fakeFetch;
-  // These legacy endpoint fixtures use zero-filled dummy PDFs; real scrubbing is covered by pdf-scrub.test.js.
-  st.settings = { pdfScrub: { enabled: false }, ...st.settings };
+  require('./helpers/pdf-fixture').installPdfFixtures(w);
   w.eval(probe); w.eval(fs.readFileSync(require('path').join(__dirname, '..', 'index-csv.js'), 'utf8')); w.eval(content);
   const root = () => [...w.document.documentElement.children].find(e => e.shadowRoot).shadowRoot;
   return { w, st, root, $: id => root().getElementById(id) };
@@ -32,7 +31,7 @@ const ok = (c, m) => { console.log((c ? 'PASS ' : 'FAIL ') + m); if (!c) process
   ok(!('pos' in e.st.settings), 'old floating-panel position removed from saved settings');
   e.w.document.querySelector('#auxMenu0 button').focus();
   e.w.__toggle({ type: 'toggle' }, null, () => { }); await tick(30);
-  ok(e.root().activeElement && e.root().activeElement.id === 'li', 'opening moves focus into the drawer (LI box)');
+  ok(e.root().activeElement && e.root().activeElement.id === 'library_folders', 'opening moves focus to Library folder setup');
   ok(e.root().querySelector('.dr').getAttribute('aria-modal') === 'true', 'drawer is marked as a modal dialog');
   ok(/v1\.6\.1/.test(e.root().querySelector('.ft').textContent), 'footer shows the extension version');
   e.$('gear').click(); await tick(20);

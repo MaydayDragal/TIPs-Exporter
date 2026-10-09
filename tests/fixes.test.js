@@ -33,8 +33,7 @@ function makeEnv({ settings, extra = {}, path = '/tips-reader/search/topics', bo
   w.confirm = () => true; w.fetch = fakeFetch;
   const pm = w.postMessage.bind(w);
   w.postMessage = (d, o) => { if (d && d.__tipsx) setTimeout(() => w.dispatchEvent(new w.MessageEvent('message', { data: d, source: w })), 0); else pm(d, o); };
-  // These legacy endpoint fixtures use zero-filled dummy PDFs; real scrubbing is covered by pdf-scrub.test.js.
-  st.settings = { pdfScrub: { enabled: false }, ...st.settings };
+  require('./helpers/pdf-fixture').installPdfFixtures(w);
   w.eval(probe); w.eval(fs.readFileSync(require('path').join(__dirname, '..', 'index-csv.js'), 'utf8')); w.eval(content);
   const env = { w, st, saved, writes, root: () => [...w.document.documentElement.children].find(e => e.shadowRoot).shadowRoot };
   env.$ = id => env.root().getElementById(id);
@@ -96,10 +95,7 @@ const IDX = T.map(x => ({ tips: x.tips, tipsId: x.tipsId, version: x.version, ti
     const bs = e.$('s_bs'); bs.value = '9'; bs.dispatchEvent(new e.w.Event('input'));
     await tick(1500);   // at least one more document + its steps while Settings is open
     ok(e.$('s_bs').value === '9', 'F5: unsaved Settings edit survives download progress');
-    e.$('tobulk') || e.root().querySelector('#tobulk');
-    // navigate to bulk: the row is hidden during a run, so switch via the view link from settings is not available — use the bulk row if present
-    if (e.$('tobulk')) { e.$('tobulk').click(); await tick(20); }
-    else { e.w.__toggle({ type: 'toggle' }); e.w.__toggle({ type: 'toggle' }); }
+    e.$('toadvanced').click(); e.$('tobulk').click(); await tick(20);
     if (e.$('tosingle')) {
       ok(!e.$('prep') && e.$('cancel') && /A single-LI download is running/.test(e.text()), 'F8: Bulk screen shows the running download with Cancel, no dead Prepare');
       e.$('cancel').click(); await waitFor(() => /cancelled/.test(e.text()));

@@ -135,10 +135,20 @@ function makeScrubber(L) {
     const sub = String(fontDict.get(PDFName.of("Subtype")) || "");
     const twoByte = sub === "/Type0";
     if (tu && (tu instanceof PDFRawStream || tu instanceof PDFStream)) {
-      let cm; try { cm = parseCMap(b2s(streamBytes(tu))); } catch { cm = { map: new Map(), bytes: twoByte ? 2 : 1 }; }
+      const cm = parseCMap(b2s(streamBytes(tu)));
+      if (![1, 2].includes(cm.bytes)) throw new Error('Unsupported ToUnicode font encoding');
       const w = twoByte ? 2 : cm.bytes;
-      dec = s => { let o = ""; for (let i = 0; i + w <= s.length; i += w) { const code = w === 2 ? (s.charCodeAt(i) << 8) | s.charCodeAt(i + 1) : s.charCodeAt(i); const u = cm.map.get(code); o += u != null ? u : (w === 1 ? s[i] : ""); } return o; };
-    } else if (twoByte) dec = s => { let o = ""; for (let i = 0; i + 1 < s.length; i += 2) o += String.fromCharCode((s.charCodeAt(i) << 8) | s.charCodeAt(i + 1)); return o; };
+      dec = s => {
+        if (s.length % w) throw new Error('Truncated ToUnicode font encoding');
+        let out = '';
+        for (let i = 0; i < s.length; i += w) {
+          const code = w === 2 ? (s.charCodeAt(i) << 8) | s.charCodeAt(i + 1) : s.charCodeAt(i), u = cm.map.get(code);
+          if (u == null || u === '') throw new Error('Unsupported or missing ToUnicode glyph mapping');
+          out += u;
+        }
+        return out;
+      };
+    } else if (twoByte || tu) throw new Error('Unsupported font without a readable ToUnicode mapping');
     else dec = simpleDecoder(ctx, fontDict);
     cache.set(key, dec); return dec;
   }
@@ -187,7 +197,14 @@ function makeScrubber(L) {
   function matchRule(text, rules) {
     if (!text) return null;
     for (const r of rules.strings) if (r && text.toUpperCase().includes(r.toUpperCase())) return r;
-    if (rules.timestamp && /^\d{2}[-./]\d{2}[-./]\d{4}\s+\d{1,2}:\d{2}(:\d{2})?(\s*[AP]M)?$/i.test(text)) return "print timestamp";
+    if (rules.strings.some(r => r.toUpperCase() === 'D7MASALL') && text.replace(/[\s\u200B-\u200D\uFEFF]/g, '').toUpperCase().includes('D7MASALL')) return 'D7MASALL';
+    if (rules.timestamp) {
+      const date = '(?:\\d{1,2}[-./]\\d{1,2}[-./]\\d{4}|\\d{4}[-./]\\d{1,2}[-./]\\d{1,2})';
+      const time = '\\d{1,2}:\\d{2}(?::\\d{2})?(?:\\s*[AP]M)?(?:\\s*(?:UTC|GMT|Z|[+-]\\d{2}:?\\d{2}))?';
+      const label = '(?:(?:download|print)(?:ed)?(?:\\s+(?:on|at))?|(?:download|print)\\s+date(?:\\s*(?:and|&)\\s*time)?)';
+      if (new RegExp('^' + date + '[ T]+' + time + '$', 'i').test(text) ||
+          new RegExp('^' + label + '\\s*:?\\s*' + date + '(?:[ T]+' + time + ')?[.]?$', 'i').test(text)) return 'download / print timestamp';
+    }
     return null;
   }
 
@@ -224,7 +241,7 @@ function makeScrubber(L) {
     // --- text removal ---
     const rules = { strings: opts.strings || [], timestamp: !!opts.timestamp };
     const decCache = new Map();
-    const decode = (fontDict, str) => fontDecoder(ctx, fontDict, decCache)(str);
+    const decode = (fontDict, str) => str ? fontDecoder(ctx, fontDict, decCache)(str) : '';
     const doneForms = new Set();
 
     async function processStream(contentBytes, resources) {

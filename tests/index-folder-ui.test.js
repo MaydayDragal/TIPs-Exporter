@@ -76,6 +76,7 @@ async function test(name, fn) { try { await fn(); console.log('PASS ' + name); }
     w.chrome = { storage: e.chrome.storage, runtime: { ...e.chrome.runtime, sendMessage: msg => e.send(msg.action, msg, 'reader'), onMessage: { addListener(fn) { w.listener = fn; } } } };
     w.fetch = async url => String(url).includes('/file/topics/') ? { ok: true, arrayBuffer: async () => new ArrayBuffer(1024) } :
       { ok: true, json: async () => ({ version: 1, attachments: [], references: [], history: { children: [] } }) };
+    require('./helpers/pdf-fixture').installPdfFixtures(w);
     w.eval(fs.readFileSync(path.join(ROOT, 'index-csv.js'), 'utf8')); w.eval(fs.readFileSync(path.join(ROOT, 'content.js'), 'utf8'));
     await until(() => e.state.index[0].title === 'Updated folder title'); await tick(100); w.listener({ type: 'toggle' }, null, () => {});
     const root = () => [...w.document.documentElement.children].find(n => n.shadowRoot)?.shadowRoot, $ = id => root()?.getElementById(id);
@@ -93,6 +94,7 @@ async function test(name, fn) { try { await fn(); console.log('PASS ' + name); }
     w.chrome = { storage: e.chrome.storage, runtime: { ...e.chrome.runtime, sendMessage: msg => e.send(msg.action, msg, 'reader'), onMessage: { addListener(fn) { w.listener = fn; } } } };
     w.fetch = async url => String(url).includes('/file/topics/') ? { ok: true, arrayBuffer: async () => new ArrayBuffer(1024) } :
       { ok: true, json: async () => ({ version: 1, attachments: [], references: [], history: { children: [] } }) };
+    require('./helpers/pdf-fixture').installPdfFixtures(w);
     w.eval(fs.readFileSync(path.join(ROOT, 'index-csv.js'), 'utf8')); w.eval(fs.readFileSync(path.join(ROOT, 'content.js'), 'utf8'));
     await tick(100); w.listener({ type: 'toggle' }, null, () => {});
     const root = () => [...w.document.documentElement.children].find(n => n.shadowRoot)?.shadowRoot, $ = id => root()?.getElementById(id);
@@ -121,6 +123,7 @@ async function test(name, fn) { try { await fn(); console.log('PASS ' + name); }
     const dom = new JSDOM('<!doctype html><body>TIPS Reader v1.22.0 - 2026</body>', { url: 'https://xentry.mercedes-benz.com/tips-reader/search/topics', runScripts: 'outside-only', pretendToBeVisual: true });
     const w = dom.window; Object.assign(w, { TextEncoder, TextDecoder, Blob, indexedDB: new IDBFactory() });
     w.chrome = { storage: e.chrome.storage, runtime: { ...e.chrome.runtime, sendMessage: msg => e.send(msg.action, msg, 'reader'), onMessage: { addListener(fn) { w.listener = fn; } } } };
+    require('./helpers/pdf-fixture').installPdfFixtures(w);
     w.eval(fs.readFileSync(path.join(ROOT, 'index-csv.js'), 'utf8')); w.eval(fs.readFileSync(path.join(ROOT, 'content.js'), 'utf8'));
     await tick(100); w.listener({ type: 'toggle' }, null, () => {});
     const root = () => [...w.document.documentElement.children].find(n => n.shadowRoot)?.shadowRoot, $ = id => root()?.getElementById(id);

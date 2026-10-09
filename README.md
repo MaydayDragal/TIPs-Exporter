@@ -1,23 +1,23 @@
 # TIPS Exporter (Chrome extension)
 
-TIPS Exporter downloads XENTRY TIPS Reader topics: the specific LI documents you pick, everything your current TIPS search found, or the whole catalogue in batches. For each topic it saves the selected PDF versions and attachments; revision history, document data and links lists are optional. It runs inside your logged-in TIPS tab, so it never sees your password, and it looks and works like part of TIPS.
+TIPS Exporter keeps a local library of XENTRY TIPS LIs and attachments up to date. It runs inside your logged-in TIPS tab, checks recent index changes, and downloads only changed or missing files into their existing folders. New PDFs undergo required cleanup of `D7MASALL`, download/print stamps and metadata before saving. Older versions and attachments are preserved.
 
-**Version 1.17.0:** the main index log now stores per-version PDF exceptions, retryable update errors, and local attachment inventories. **Scan & verify** inventories attachments from your selected folder without TIPS requests. Known unavailable or scrub-rejected PDF versions are excluded from required coverage and routine downloads; newer versions remain eligible. Future update failures refresh the error list automatically. Use **Retry excluded versions** for an explicit targeted retry. Older PDFs and attachments are preserved.
+**Version 1.18.0:** the main **Library** screen combines **Sync now**, **Scan & verify**, folder settings and a single automatic-sync switch. **Advanced** keeps Single LI, search-result, and bulk ZIP exports. The existing index log, attachment inventory and error exclusions continue to work. Known unavailable or scrub-rejected PDF versions stay out of routine downloads and required coverage; new versions remain eligible.
 
 ## Install
 
 1. Download this repository with **Code → Download ZIP** and extract it to a permanent folder. Open the extracted repository folder that contains `manifest.json`.
 2. In Chrome, open `chrome://extensions` and switch on **Developer mode** (top right).
-3. Click **Load unpacked** and select the extracted folder that directly contains `manifest.json`. The extension card must show **1.17.0**.
+3. Click **Load unpacked** and select the extracted folder that directly contains `manifest.json`. The extension card must show **1.18.0**.
 4. Optional: pin the extension to the toolbar (puzzle icon, then the pin).
 
 Needs Chrome 111 or newer.
 
-**Updating:** unzip the new release to the same place (replacing the files), click the reload icon on TIPS Exporter in `chrome://extensions`, and reload the TIPS tab. Your session settings, PDF scrub rules, progress and recent downloads are kept. The previous all-data-files default switches to PDFs/attachments only on the first upgrade; custom file selections are preserved. You can re-enable any data files under **⚙ → Data files to include**. A batch or interrupted download prepared in the old layout must be prepared again; completed export progress is unchanged.
+**Updating:** unzip the new release to the same place (replacing the files), click the reload icon on TIPS Exporter in `chrome://extensions`, and reload the TIPS tab. Your folder selections, session settings, custom scrub rules, progress and recent downloads are kept. Required PDF cleanup is enforced even if an older installation had disabled scrubbing. The previous all-data-files default switches to PDFs/attachments only on the first upgrade; custom file selections are preserved. You can re-enable any data files under **⚙ → Advanced ZIP contents**. A batch or interrupted download prepared under an older PDF cleanup policy or layout must be prepared again; completed export progress is unchanged.
 
 ## Shared index folder
 
-1. Open **⚙ → Index folder → Choose / change index folder…**. You can also open **Extension options** from the extension's Chrome Details page.
+1. Open **Library → Folder settings**. You can also open **Extension options** from the extension's Chrome Details page.
 2. Click **Choose folder…** in the extension Settings tab. Select a permanent folder, such as `Documents\TIPS-Index`, outside the extension's installation folder, and allow read/write access.
 3. Select the existing progress CSV in **Index filename**, or keep `_progress_log_all_documents.csv` to create a new one. When there are several CSV files, choose the index from the filename suggestions.
 4. Click **Use this folder and index**. An existing index is validated and loaded automatically. If that filename does not exist, the current browser index/progress is written there, including an empty index if you have not built one yet.
@@ -26,19 +26,19 @@ The file is checked before loading the index when TIPS opens. Building an index,
 
 **Future versions:** updating the same unpacked extension in place retains the folder selection. A separate installation can select the same folder and CSV to restore progress. Chrome requires a folder picker; typing an absolute Windows path cannot grant access. If Chrome expires or revokes access, choose **Allow folder access** and then **Check & sync** in the folder Settings tab. Chrome may offer a persistent permission choice.
 
-**When something goes wrong:** folder status appears in Settings and Bulk export. If permission is lost, the folder is unavailable, or a write fails, the newer progress stays in Chrome and auto-continue pauses. Restore access and choose **Check & sync** to save that pending progress. A missing configured index is not silently recreated; reconnect its folder/file to initialize it from the browser copy.
+**When something goes wrong:** folder status appears in Library and Settings. If permission is lost, the folder is unavailable, or a write fails, the newer progress stays in Chrome and auto-continue pauses. Restore access and choose **Check & sync** to save that pending progress. A missing configured index is not silently recreated; reconnect its folder/file to initialize it from the browser copy.
 
 If the file was changed elsewhere and the browser also has unsaved changes, both copies are retained and a conflict is shown. Save the browser copy with **Bulk export → Save log** before deciding which one to keep. **Reload folder index** explicitly adopts the file and replaces cached progress after confirmation. Disconnect leaves the browser copy available. Finish or discard an active/prepared/interrupted export before switching or reloading the index source. An older tab cannot overwrite progress committed by another tab; review the newer index if a stale-tab message appears.
 
-Only the selected CSV is updated. PDF/ZIP downloads still use Chrome's download location. Shared folder storage is intended for one active exporter installation at a time; it is not a multi-user database or a live filesystem watcher. Use **Check & sync** or reload TIPS to adopt changes made while the page was already open.
+The selected index CSV is updated in place. Library updates save directly to the documents folder; Advanced ZIP exports use Chrome's download location. Shared folder storage is intended for one active exporter installation at a time; it is not a multi-user database or a live filesystem watcher. Use **Check & sync** or reload TIPS to adopt changes made while the page was already open.
 
 ## Saved documents folder and verification
 
-1. Open **⚙ → Documents folder → Choose / change documents folder…**.
+1. Open **Library → Folder settings → Choose documents folder…**.
 2. Choose the **parent containing your LI/GI document folders**, including any batch subfolders. Select your archive, not the extension installation folder or an individual LI folder.
 3. Set the attachment subfolder used inside each LI; the default is **Attachments and Links**. Click **Use this documents folder**.
-4. In **Bulk export → Saved documents**, click **Scan & verify** to compare the folder with the currently loaded index/progress log. Use the shared index folder above, or import your log first.
-5. Use **Check new** to refresh the index from recent TIPS changes. Click **Update saved documents** to fetch only indexed changes and missing files. Check **Include missing documents from index** when you also want to create entirely missing topic folders.
+4. In **Library**, click **Scan & verify** to compare the folder with the loaded index/progress log. Use the shared index folder above, or import a log under Advanced first.
+5. Click **Sync now** to check recent TIPS changes and save indexed changes and missing files in one step. **Download indexed documents missing from this folder** is on by default; turn it off to update only folders already present. **Folder repair options → Update saved documents** uses the loaded index directly without a new search.
 
 The inventory lists saved and missing PDF versions, empty/invalid PDFs, duplicate LI/GI folders, documents outside the index, and missing or size-changed indexed attachments. It distinguishes folders **marked exported but missing** from **pending documents not yet saved**. Required-document/version totals exclude known PDF exceptions; the full catalogue total stays visible. Download the complete **inventory CSV** for every document, its folder path, exceptions, local attachments, and discrepancies. Scans and folder updates preserve exported/pending status.
 
@@ -52,11 +52,11 @@ Existing unavailable-version history and recognized errors in the last saved fol
 
 **Preserving files:** LI numbers identify existing folders even when titles have changed. A new `LI…_v5.pdf` goes beside v1–v4 in that same folder. Valid saved PDFs are skipped. Invalid existing PDFs are reported and preserved; move one aside manually and update again to replace it. A changed `photo.jpg` is added as `photo (v5).jpg`, then `photo (v5-2).jpg` if needed. Identical contents already saved under the original name or a version name are skipped. Removed upstream attachments and unrelated files stay. Duplicate LI folders and mixed container/topic locations are excluded from updates until you resolve the ambiguity. Loose PDFs never hide LI folders nested underneath.
 
-**Incremental updates:** manual and automatic updates use the same selection rules. The local scan and loaded index identify new versions, missing files, newer modification dates, and previous interrupted/failed updates. All other documents are skipped without TIPS requests. Selected documents use the indexed topic ID and version directly, with no separate per-document search. The progress counter counts only selected documents; the result reports how many unchanged documents were skipped. If nothing needs downloading, a manual folder update makes zero TIPS requests. An existing archive is compared with an offline index baseline, without an initial attachment-download sweep. The baseline persists across reloads and is separate from actual attachment verification. Scrub-rule changes alone do not select unchanged documents.
+**Incremental updates:** manual and automatic updates use the same selection rules. The local scan and loaded index identify new versions, missing files, newer modification dates, and previous interrupted/failed updates. All other documents are skipped without TIPS requests. Selected documents use the indexed topic ID and version directly, with no separate per-document search. The progress counter counts only selected documents; the result reports how many unchanged documents were skipped. If nothing needs downloading, the repair action makes zero TIPS requests. **Sync now** still makes the recent index-search requests, but no per-document requests. An existing archive is compared with an offline index baseline, without an initial attachment-download sweep. The baseline persists across reloads and is separate from actual attachment verification. Scrub-rule changes alone do not select unchanged documents.
 
-**Automatic updates:** enabled by default for a connected documents folder. After a successful **Check new**, including the check when TIPS loads, the exporter scans and updates only existing saved document folders that meet the selection rules above. The index check still makes its normal recent-search requests. It remembers the prior index before applying changes so same-version attachment edits with a newer modification date remain detectable. TIPS must be open and logged in. Changes that are not reflected in the index's version or modification date cannot be detected without a separate live check; there is no automatic full attachment sweep.
+**Automatic updates:** enabled by default for a connected documents folder. **Automatically sync when TIPS opens** controls the startup check and automatic update after Advanced **Check new**. The exporter scans and updates documents that meet the selection rules above, including missing topic folders when **Download indexed documents missing from this folder** is enabled. Pausing this switch prevents automatic checks; **Sync now** remains available. The index check still makes its normal recent-search requests. It remembers the prior index before applying changes so same-version attachment edits with a newer modification date remain detectable. TIPS must be open and logged in. Automatic checks run on opening/reloading TIPS, with no periodic polling or closed-browser background downloads. Changes that are not reflected in the index's version or modification date cannot be detected without a separate live check; there is no automatic full attachment sweep.
 
-**Scrubbing and interruptions:** new PDFs and PDF attachments use your scrub rules before saving. Existing PDFs are not rewritten when rules change. Stop waits for the current network request, cancels remaining work, and keeps completed files. A lost session, revoked access, or worker restart produces a retryable error. Restore your session or choose **Allow documents access**, then update again. The extension cleans its own uncommitted empty placeholders and skips completed files. Avoid editing the archive from another application or extension installation during an update; tab coordination only covers this installation.
+**Scrubbing and interruptions:** new PDFs and PDF attachments receive required cleanup plus your additional scrub rules before saving. Existing PDFs are not rewritten when rules change. Stop waits for the current network request, cancels remaining work, and keeps completed files. A lost session, revoked access, or worker restart produces a retryable error. Restore your session or choose **Allow documents access**, then update again. The extension cleans its own uncommitted empty placeholders and skips completed files. Avoid editing the archive from another application or extension installation during an update; tab coordination only covers this installation.
 
 Folder handles persist across updates to the same installation. A new installation must select the index and documents folders again; portable exceptions and attachment expectations are restored from the index, and a local scan inventories new files. Scans support 8 nested container levels, 8 nested attachment levels, and 100,000 entries; choose a more specific archive folder if a limit is reached. Each downloaded file is limited to 512 MiB. Folder updates save PDFs and attachment files; optional metadata and links lists remain ZIP export features. If the index disk is temporarily unavailable, metadata stays in Chrome awaiting synchronization. Conflicting or stale index saves never discard unacknowledged exception records.
 
@@ -71,12 +71,12 @@ The exporter slides in from the right like a TIPS topic and dims the page. Close
 
 There are four ways, and they all produce the same zip.
 
-**Type the numbers** (the **Single LI** tab)
+**Type the numbers** (**Advanced → Single LI**)
 1. Enter one or more LI numbers, e.g. `LI42.10-P-078779`, separated by spaces, commas or new lines. Once the bulk index is built, a unique ending such as `078779` also works.
 2. Click **Look up** (or press Ctrl+Enter). Each entry is checked live in TIPS, so you always get the current version. The drawer shows the version and how many prior versions each has, and explains any entry it couldn't use.
 3. Click **Download N**. The progress shows each document and the step it's on. **Cancel download** saves nothing.
 
-**Use your current TIPS search.** Run a search in TIPS as usual (free text, function group, symptom, fault code…). The **Single LI** tab then offers **Your current TIPS search → Use search**, which lists every topic that search found (up to 300) ready to download. For bigger searches, narrow them down or use Bulk export.
+**Use your current TIPS search.** Run a search in TIPS as usual (free text, function group, symptom, fault code…). The **Advanced → Single LI** tab then offers **Your current TIPS search → Use search**, which lists every topic that search found (up to 300) ready to download. For bigger searches, narrow them down or use Bulk export.
 
 **From the search results.** Every row in the TIPS results list gets a small **download** icon on its right edge. Clicking it opens a list of that topic's versions, newest first, with the date each was published (and the current version's reason for change):
 - the current version is ticked; tick older ones too, or use **All** / **Current only**;
@@ -93,24 +93,24 @@ The zip is saved to your Downloads folder as `<LI number> - <Title>.zip`, or `TI
 
 ## Automatic PDF scrubbing
 
-On by default for every export path: Single LI, search results, the open-topic toolbar, recent downloads, bulk batches, and new documents-folder files. It processes the current PDF, selected prior versions, and PDF attachments before saving them. PDF attachments are recognized by filename, response content type, or PDF file header. Other attachments retain their original bytes and names. Files inside attached ZIP archives are not unpacked or scrubbed.
+Required for every download path: Single LI, search results, the open-topic toolbar, recent downloads, bulk batches, and new documents-folder files. It processes the current PDF, selected prior versions, and PDF attachments before saving them. PDF attachments are recognized by filename, response content type, or PDF file header. Other attachments retain their original bytes and names. Files inside attached ZIP archives are not unpacked or scrubbed.
 
 Under **⚙ → PDF scrubbing**:
 
-- **Automatically scrub PDFs before saving** enables or disables processing. Turning it off saves the original PDF bytes.
+- **Required PDF cleanup** cannot be disabled. `D7MASALL` is always removed, even if the optional session-user rule is off or custom text is empty.
 - **Remove the detected session user ID** is on by default and uses the User shown in Settings.
-- **Remove the print date and time stamp** is on by default. It matches a separate text block containing a date such as `02-10-2026 13:55:18` (also `/` or `.` separators, optional seconds and AM/PM).
-- **Additional text to remove** accepts one entry per line or comma-separated entries, matched without regard to case. It starts with `D7MASALL`, as in the supplied scrubber. Click **Save** after editing this text; changing a scrub checkbox also saves it.
+- **Remove download / print timestamps** is required. It matches separate date-and-time blocks such as `02-10-2026 13:55:18`, US-style and ISO-style numeric dates, plus labelled download/print dates with optional times. Standalone revision dates are kept.
+- **Additional text to remove** accepts one entry per line or comma-separated entries, matched without regard to case. These rules supplement the fixed `D7MASALL` rule. Click **Save** after editing this text; changing a scrub checkbox also saves it.
 
-While enabled, the scrubber always removes the PDF Info dictionary (author, title, producer, creator, dates and other fields), file ID, embedded XMP, PieceInfo application data and LastModified fields. It rewrites the PDF and drops unreachable objects so the replaced content streams and old metadata are not retained in the output. The PDF library is bundled in the extension; processing uses no CDN or external service and requests no additional extension permissions.
+The scrubber always removes the PDF Info dictionary (author, title, producer, creator, dates and other fields), file ID, embedded XMP, PieceInfo application data and LastModified fields. It rewrites the PDF and drops unreachable objects so the replaced content streams and old metadata are not retained in the output. The PDF library is bundled in the extension; processing uses no CDN or external service and requests no additional extension permissions.
 
-The scrubber keeps the supplied tool's text-block matching: all text in a matching `BT…ET` block is removed. Font and graphics-state operators are preserved so later text keeps its original appearance. Separate page-number and copyright blocks remain; if a PDF combines those with a matched ID in one block, all of that block's text is removed. This is not OCR or a general redaction tool: text drawn as an image or outlines, unusual font encodings, annotations, and data in non-PDF exports are outside its matching rules. No claim is made that arbitrary PDF attachments are fully anonymized. JSON/CSV exports are unchanged; use **Data files to include** to disable them if wanted.
+The scrubber keeps the supplied tool's text-block matching: all text in a matching `BT…ET` block is removed. Font and graphics-state operators are preserved so later text keeps its original appearance. Separate page-number and copyright blocks remain; if a PDF combines those with a matched ID in one block, all of that block's text is removed. This is not OCR or a general redaction tool: text drawn as an image or outlines, unusual font encodings, annotations, and data in non-PDF exports are outside its matching rules. No claim is made that arbitrary PDF attachments are fully anonymized. JSON/CSV exports are unchanged; configure them under **Advanced ZIP contents**.
 
 **If a PDF cannot be processed**, including encrypted or damaged PDFs, it is omitted, with its filename and a reason in the existing errors display and `_errors.txt` / `_batch_NNN_errors.txt`. The original PDF is never substituted silently. Other files continue exporting. Affected bulk topics remain pending and auto-continue stops so the same failure does not loop. Export summaries show the number of PDFs scrubbed and text blocks removed, without logging the removed text or metadata values.
 
 Scrub rules are fixed for an active/prepared/interrupted download. Finish or discard that download before changing them. Prepared ZIPs and interrupted downloads from older versions, or with different active scrub rules, must be prepared again; they are not approved with unprocessed PDFs. Your bulk progress and recent-download history remain intact.
 
-## Bulk export
+## Advanced: bulk export
 
 The **Bulk export** tab works through the whole catalogue in batches you approve one by one.
 
@@ -169,7 +169,7 @@ LI00.00-P-066047 - Odor like crayon or vinegar entering the pass (Requested)/
 
 Every topic in a selection or bulk batch uses the same layout. Folders are written first, then files in natural numeric order (`v1`, `v2`, … `v10`). ZIP viewers can apply their own sort order. PDFs keep their original LI/version filenames, and downloaded attachments keep their filenames subject to Windows-safe shortening and duplicate-name handling. Missing or failed PDFs are recorded in an errors text file.
 
-Under **⚙ → Data files to include**, use **All**, **CSV only**, **JSON only**, **None**, or individual checkboxes. Optional document JSON goes beside the PDFs; optional revision history CSV/JSON goes in `Revision History`; the optional links CSV goes in `Attachments and Links`; the optional manifest goes at the ZIP root. Prior-version PDFs always stay beside the current PDF. A links list records references to other LIs; it does not download those referenced topics automatically.
+Under **⚙ → Advanced ZIP contents**, use **All**, **CSV only**, **JSON only**, **None**, or individual checkboxes. Optional document JSON goes beside the PDFs; optional revision history CSV/JSON goes in `Revision History`; the optional links CSV goes in `Attachments and Links`; the optional manifest goes at the ZIP root. Prior-version PDFs always stay beside the current PDF. A links list records references to other LIs; it does not download those referenced topics automatically.
 
 Bulk ZIPs always retain `_progress_log_all_documents.csv` at the root so they can be resumed. Batch manifests are optional and error files appear only when something failed or was skipped. A successful single-topic export with **None** selected contains just PDFs and attachments, as in the example.
 
@@ -198,7 +198,7 @@ After updating, reload the extension and the TIPS tab, then check:
 6. Bulk export → **Check new** reports *No topics have changed…* or lists what it found.
 7. In **Bulk export**, with batch size 2, prepare and approve a batch; the progress log updates.
 8. Select an index folder in Settings. Approve a batch and verify its CSV updates; reload TIPS and confirm the same progress loads. Settings and recent downloads stay in Chrome.
-9. **⚙ → PDF scrubbing** is enabled. Download a topic and open its PDF: the configured user ID and separate print timestamp should be gone, body content should remain, and the export summary should report PDFs scrubbed. Check prior versions and a PDF attachment too.
+9. **⚙ → PDF scrubbing** shows required cleanup. Download a topic and open its PDF: the configured user ID and separate print timestamp should be gone, body content should remain, and the export summary should report PDFs scrubbed. Check prior versions and a PDF attachment too.
 
 10. Select a documents folder containing a saved LI with v1–v4. Scan it against an index listing v5: the report should show v5 missing. Update it, then confirm v5 appears beside v1–v4 and older attachments remain. Run again to confirm identical attachments are skipped. Download the inventory CSV.
 
@@ -211,4 +211,4 @@ npm install
 npm test
 ```
 
-`vendor/pdf-lib.min.js` is the bundled, unmodified pdf-lib 1.17.1 UMD distribution; its MIT license is in `vendor/pdf-lib.LICENSE.md`. `pdf-scrubber.js` is adapted from the provided LI PDF Scrub HTML. The new PDF tests use real generated PDFs and inspect the PDFs extracted from the exported ZIPs. Existing endpoint simulation tests explicitly disable scrubbing because their dummy PDF responses contain only zero bytes.
+`vendor/pdf-lib.min.js` is the bundled, unmodified pdf-lib 1.17.1 UMD distribution; its MIT license is in `vendor/pdf-lib.LICENSE.md`. `pdf-scrubber.js` is adapted from the provided LI PDF Scrub HTML. The new PDF tests use real generated PDFs and inspect the PDFs extracted from the exported ZIPs. Endpoint simulation tests also use real PDF fixtures, so required cleanup is exercised without contacting TIPS. Library tests cover startup pause, incremental requests, old-setting migration, folder preservation, and missing-folder preferences.

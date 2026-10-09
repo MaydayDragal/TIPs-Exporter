@@ -1,5 +1,5 @@
 const assert = require('node:assert/strict');
-const { LI, TOPIC, ITEM, pdf, until, connected, content } = require('./helpers/documents-env');
+const { LI, TOPIC, ITEM, makePdf, assertSavedPdf, pdf, until, connected, content } = require('./helpers/documents-env');
 const Client = require('../documents-client');
 async function test(name, fn) { try { await fn(); console.log('PASS ' + name); } catch (e) { console.log('FAIL ' + name + ': ' + e.stack); process.exitCode = 1; } }
 async function update(c, e) {
@@ -14,7 +14,7 @@ const topic = extra => ({ tips: LI, versions: [1,2,3,4,5], missingAttachments: [
     const e = await complete(), c = await content(e);
     try {
       await update(c, e); assert.deepEqual(c.requests, []);
-      assert.equal(e.d.state.writes.length, 0); assert.match(c.$('doc_status').textContent, /no TIPS requests/i);
+      assert.equal(e.d.state.writes.length, 0); assert.match(c.$('doc_status').textContent, /no document requests/i);
       assert.equal((await e.db.get('documentsConnection')).progress[LI], undefined, 'an index baseline does not claim a live attachment check');
     } finally { c.close(); }
   });
@@ -27,7 +27,7 @@ const topic = extra => ({ tips: LI, versions: [1,2,3,4,5], missingAttachments: [
       await update(c, e);
       assert.equal(c.requests.length, 4, 'one metadata request, one missing PDF, one attachment URL, one attachment download');
       assert(!c.requests.some(u => u.includes('/search') || u.includes('/topics/102/')));
-      assert.equal(await e.d.read(`${TOPIC}/${LI}_v5.pdf`), pdf(5));
+      await assertSavedPdf(e.d, `${TOPIC}/${LI}_v5.pdf`, 5);
       assert.equal(await e.d.read(`${TOPIC}/Attachments and Links/photo.jpg`), 'old photo');
       assert.equal(await e.d.read(`${TOPIC}/Attachments and Links/photo (v5).jpg`), 'new photo');
       c.requests.length = 0; await update(c, e); assert.deepEqual(c.requests, [], 'a second update does no remote work');
@@ -39,7 +39,7 @@ const topic = extra => ({ tips: LI, versions: [1,2,3,4,5], missingAttachments: [
     await folder.removeEntry(`${LI}_v2.pdf`);
     const c = await content(e);
     try {
-      await update(c, e); assert.equal(await e.d.read(`${TOPIC}/${LI}_v2.pdf`), pdf(2));
+      await update(c, e); await assertSavedPdf(e.d, `${TOPIC}/${LI}_v2.pdf`, 2);
       assert.equal(c.requests.length, 2, 'only indexed metadata and the missing historical PDF');
       assert(!c.requests.some(u => u.includes('/read/download/url') || u.startsWith('https://files.test/')));
       assert.equal(await e.d.read(`${TOPIC}/Attachments and Links/photo.jpg`), 'old photo');
@@ -94,7 +94,7 @@ const topic = extra => ({ tips: LI, versions: [1,2,3,4,5], missingAttachments: [
     r.progress[LI] = { version: 5, mdate: ITEM.mdate, ok: true, unavailable: [2], files: [] };
     const c = await content(e);
     try {
-      await update(c, e); assert.equal(await e.d.read(`${TOPIC}/${LI}_v3.pdf`), pdf(3));
+      await update(c, e); await assertSavedPdf(e.d, `${TOPIC}/${LI}_v3.pdf`, 3);
       assert(!c.requests.some(u => /\/file\/topics\/101\/2\?/.test(u)));
       assert.deepEqual((await e.db.get('documentsConnection')).progress[LI].unavailable, [2]);
       c.requests.length = 0; await update(c, e); assert.deepEqual(c.requests, []);
@@ -124,7 +124,7 @@ const topic = extra => ({ tips: LI, versions: [1,2,3,4,5], missingAttachments: [
       assert.deepEqual((await e.db.get('documentsConnection')).progress[LI].unavailable, [2]);
       fail = false; c.requests.length = 0; await update(c, e);
       assert(!c.requests.some(u => /\/file\/topics\/101\/2\?/.test(u)));
-      assert.equal(await e.d.read(`${TOPIC}/${LI}_v3.pdf`), pdf(3));
+      await assertSavedPdf(e.d, `${TOPIC}/${LI}_v3.pdf`, 3);
     } finally { c.close(); }
   });
   await test('missing history and scrub-rule changes alone do not select complete documents', async () => {

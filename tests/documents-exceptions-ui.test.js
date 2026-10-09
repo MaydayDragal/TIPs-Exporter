@@ -1,5 +1,5 @@
 const assert = require('node:assert/strict');
-const { LI, TOPIC, ITEM, pdf, until, connected, content } = require('./helpers/documents-env');
+const { LI, TOPIC, ITEM, makePdf, assertSavedPdf, pdf, until, connected, content } = require('./helpers/documents-env');
 const CSV = require('../index-csv');
 const AT = '2026-10-09T12:00:00.000Z';
 const exception = (version, kind = 'unavailable', reason = 'Version not available in TIPS') => ({ version, kind, reason, at: AT });
@@ -52,7 +52,7 @@ async function indexFolder(e) {
     } finally { c.close(); }
   });
   await test('future scrub failures are recorded automatically and skipped on the next routine update', async () => {
-    const e = await connected(); e.state.settings.pdfScrub = { enabled: true }; const c = await content(e);
+    const e = await connected(); e.state.settings.pdfScrub = { enabled: true }; const c = await content(e, async (u, _o, h) => u.includes('/file/topics/') ? h.binary('%PDF-invalid') : null);
     try {
       await update(c, e); assert.equal(e.state.index[0].exceptions[0].kind, 'scrub_failed'); assert.equal(e.state.index[0].exceptions[0].version, 5);
       assert.match(c.$('doc_exceptions').textContent, /scrub_failed/); assert(!c.$('doc_inventory').textContent.includes('missing v5'));
@@ -72,7 +72,7 @@ async function indexFolder(e) {
   await test('new versions download while earlier excluded PDFs stay skipped', async () => {
     const e = await connected(); e.state.index[0].version = 6; e.state.index[0].exceptions = [exception(5)]; const c = await content(e); c.active.version = 6;
     try {
-      await update(c, e); assert.equal(await e.d.read(`${TOPIC}/${LI}_v6.pdf`), pdf(6)); assert(!c.requests.some(u => /\/file\/topics\/101\/5\?/.test(u)));
+      await update(c, e); await assertSavedPdf(e.d, `${TOPIC}/${LI}_v6.pdf`, 6); assert(!c.requests.some(u => /\/file\/topics\/101\/5\?/.test(u)));
       assert.deepEqual(e.state.index[0].exceptions, [exception(5)]); c.requests.length = 0; await update(c,e); assert.deepEqual(c.requests, []);
     } finally { c.close(); }
   });
@@ -80,10 +80,10 @@ async function indexFolder(e) {
     const e = await connected(); e.state.index[0].version = 6; e.state.index[0].exceptions = [exception(5)];
     e.state.index.push({ ...ITEM, tips: 'LI20.10-P-075374', tipsId: 102 }); const c = await content(e); c.active.version = 6;
     try {
-      await scan(c); await update(c, e, true); assert.equal(await e.d.read(`${TOPIC}/${LI}_v5.pdf`), pdf(5));
+      await scan(c); await update(c, e, true); await assertSavedPdf(e.d, `${TOPIC}/${LI}_v5.pdf`, 5);
       assert.equal(e.state.index[0].exceptions, undefined); assert.equal(c.requests.length, 2, 'only metadata and excluded PDF');
       assert(!c.requests.some(u => /\/102\/|\/search|\/file\/topics\/101\/6\?/.test(u)));
-      c.requests.length = 0; await update(c, e); assert.equal(await e.d.read(`${TOPIC}/${LI}_v6.pdf`), pdf(6), 'retry did not hide a newer pending version');
+      c.requests.length = 0; await update(c, e); await assertSavedPdf(e.d, `${TOPIC}/${LI}_v6.pdf`, 6);
     } finally { c.close(); }
   });
   await test('retrying a still unavailable version refreshes its date without polling attachments', async () => {

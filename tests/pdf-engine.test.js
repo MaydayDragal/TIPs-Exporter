@@ -55,6 +55,25 @@ async function stream(bytes) {
     }));
     await assert.rejects(() => scrubber.scrub(original, { strings: ['D7MASALL'] }), /font|glyph|encoding/i);
   });
+  await test('unreadable ToUnicode streams fail cleanup instead of retaining encoded user IDs', async () => {
+    const original = await fixture('BT /F1 12 Tf 20 100 Td <00440037004d004100530041004c004c> Tj ET', c => ({
+      F1: c.register(c.obj({Type:'Font',Subtype:'Type0',BaseFont:'Test',Encoding:'Identity-H',
+        ToUnicode:c.register(L.PDFRawStream.of(c.obj({Filter:'FlateDecode',Length:3}),new Uint8Array([1,2,3])))}))
+    }));
+    await assert.rejects(()=>scrubber.scrub(original,{strings:['D7MASALL'],timestamp:true}),/compression|unicode|font|encoding/i);
+  });
+  await test('missing, partial and truncated Type0 mappings cannot silently retain text', async () => {
+    for (const [cmap, content] of [
+      [null, '<0044>'],
+      ['1 begincodespacerange <0000> <FFFF> endcodespacerange 1 beginbfchar <0044> <0044> endbfchar', '<00440037>'],
+      ['1 begincodespacerange <0000> <FFFF> endcodespacerange 1 beginbfchar <0044> <0044> endbfchar', '<004400>']
+    ]) {
+      const original = await fixture(`BT /F1 12 Tf 20 100 Td ${content} Tj ET`,c=>({
+        F1:c.register(c.obj({Type:'Font',Subtype:'Type0',BaseFont:'Test',Encoding:'Identity-H',...(cmap?{ToUnicode:c.register(c.flateStream(cmap))}:{})}))
+      }));
+      await assert.rejects(()=>scrubber.scrub(original,{strings:['D7MASALL'],timestamp:true}),/unicode|font|mapping|encoding/i);
+    }
+  });
   await test('encrypted PDFs are rejected', async () => {
     const d = await PDFDocument.create(); d.addPage(); d.context.trailerInfo.Encrypt = d.context.register(d.context.obj({ Filter: 'Standard', V: 1, R: 2 }));
     const b = await d.save(); await assert.rejects(() => scrubber.scrub(b, {}), /encrypt/i);

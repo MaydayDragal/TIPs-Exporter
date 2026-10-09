@@ -3,7 +3,7 @@ const ROOT = path.join(__dirname, '..');
 if (['documents-background.js', 'documents-client.js', 'documents-settings.js'].some(f => !fs.existsSync(path.join(ROOT, f)))) {
   console.log('FAIL document folder Settings, worker, and content integration are not implemented'); process.exit(1);
 }
-const { LI, TOPIC, ITEM, pdf, tick, until, worker, connected, content, directory, JSDOM } = require('./helpers/documents-env');
+const { LI, TOPIC, ITEM, makePdf, assertSavedPdf, pdf, tick, until, worker, connected, content, directory, JSDOM } = require('./helpers/documents-env');
 async function test(name, fn) { try { await fn(); console.log('PASS ' + name); } catch (e) { console.log('FAIL ' + name + ': ' + e.stack); process.exitCode = 1; } }
 async function update(c, e) { c.$('doc_update').click(); await until(() => e.messages.some(m => m.action === 'end'), 'folder update'); await until(() => !c.$('doc_update').disabled, 'update idle'); }
 (async () => {
@@ -15,14 +15,14 @@ async function update(c, e) { c.$('doc_update').click(); await until(() => e.mes
     await e.db.put('documents-candidate:gi', { handle: d }); assert((await e.send('connect', { token: 'gi', options: { auto: false } }, 'options')).ok);
     const c = await content(e, async (u, options, h) => {
       if (options?.method === 'POST') return h.json({ hits: [{ ...e.state.index[0], modificationDate: '2026-10-09' }], totalHits: 1 });
-      if (u.includes('/file/topics/102/')) return h.binary(pdf(+u.match(/\/102\/(\d+)/)[1]));
+      if (u.includes('/file/topics/102/')) return h.binary(await makePdf('version ' + u.match(/\/102\/(\d+)/)[1]));
       if (u.includes('/topics/102/')) return h.json({ version: 12, attachments: [{ filename: 'photo.jpg', dataUrl: 'https://attachments.test/?readKey=one' }], references: [], history: { children: [] } });
     });
     try {
       c.$('doc_scan').click(); await until(() => !c.$('doc_scan').disabled);
       assert(c.$('doc_report'), c.$('doc_status').textContent); assert.match(c.$('doc_inventory').textContent, /GI72\.12-P-053999.*missing v12/);
       c.$('doc_report').click(); assert.match(await c.downloads[0].text(), /GI72\.12-P-053999/);
-      await update(c, e); assert.equal(await d.read(`${folder}/${gi}_v12.pdf`), pdf(12));
+      await update(c, e); await assertSavedPdf(d, `${folder}/${gi}_v12.pdf`, 12);
       for (let v = 1; v <= 11; v++) assert.equal(await d.read(`${folder}/${gi}_v${v}.pdf`), pdf(v));
       assert.equal(await d.read(`${folder}/Attachments and Links/photo.jpg`), 'old photo'); assert.equal(await d.read(`${folder}/Attachments and Links/photo (v12).jpg`), 'new photo');
       assert.equal(c.requests.filter(u => u.includes('/file/topics/')).length, 1); assert.equal(e.state.done[102].v, 12);
@@ -73,7 +73,7 @@ async function update(c, e) { c.$('doc_update').click(); await until(() => e.mes
   await test('manual update adds v5 beside v1-v4 and preserves old photos without marking bulk progress', async () => {
     const e = await connected(), before = JSON.stringify(e.state.done), c = await content(e);
     try {
-      await update(c, e); for (let v = 1; v <= 5; v++) assert.equal(await e.d.read(`${TOPIC}/${LI}_v${v}.pdf`), pdf(v));
+      await update(c, e); for (let v = 1; v <= 4; v++) assert.equal(await e.d.read(`${TOPIC}/${LI}_v${v}.pdf`), pdf(v)); await assertSavedPdf(e.d, `${TOPIC}/${LI}_v5.pdf`, 5);
       assert.equal(await e.d.read(`${TOPIC}/Attachments and Links/photo.jpg`), 'old photo'); assert.equal(await e.d.read(`${TOPIC}/Attachments and Links/photo (v5).jpg`), 'new photo');
       assert.equal(c.requests.filter(u => u.includes('/file/topics/')).length, 1); assert.equal(JSON.stringify(e.state.done), before);
       assert.equal((await e.db.get('documentsConnection')).progress[LI].ok, true); assert.match(c.$('doc_inventory').textContent, /1.*complete|complete.*1/i);
@@ -117,7 +117,7 @@ async function update(c, e) { c.$('doc_update').click(); await until(() => e.mes
       await update(c, e); assert.equal(d.children.size, 0); e.messages.length = 0;
       c.$('doc_missing').checked = true; c.$('doc_missing').dispatchEvent(new c.w.Event('change')); await update(c, e);
       const base = `${LI} - New title (Requested)`;
-      for (let v = 1; v <= 5; v++) assert.equal(await d.read(`${base}/${LI}_v${v}.pdf`), pdf(v));
+      for (let v = 1; v <= 5; v++) await assertSavedPdf(d, `${base}/${LI}_v${v}.pdf`, v);
       assert.equal(await d.read(`${base}/Attachments and Links/photo.jpg`), 'new photo'); assert.equal(e.state.done[101].v, 5);
     } finally { c.close(); }
   });
@@ -138,7 +138,7 @@ async function update(c, e) { c.$('doc_update').click(); await until(() => e.mes
     } finally { c.close(); }
   });
   await test('failed PDF scrubbing leaves existing files intact and records excluded latest coverage', async () => {
-    const e = await connected(); e.state.settings.pdfScrub = { enabled: true }; const c = await content(e);
+    const e = await connected(); e.state.settings.pdfScrub = { enabled: true }; const c = await content(e, async (u, _o, h) => u.includes('/file/topics/') ? h.binary('%PDF-invalid') : null);
     try {
       await update(c, e); await assert.rejects(e.d.read(`${TOPIC}/${LI}_v5.pdf`), /NotFound/);
       assert.equal(await e.d.read(`${TOPIC}/${LI}_v4.pdf`), pdf(4)); assert.match(c.$('doc_status').textContent, /scrub failed/);

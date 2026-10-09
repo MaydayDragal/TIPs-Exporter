@@ -34,7 +34,7 @@
     resume: null,       // a download interrupted by a lost session: {title, kind, remaining, carry, finish}
     latest: {},         // newest versions seen by "Check for updates": tips -> version
     settings: { outlet: '', user: '', ver: '', batchSize: 25, delayMs: 2000, delayMaxMs: 5000, pageSize: 50, pageSizeSrc: 'default',
-      autoApprove: false, autoContinue: true, autoCheck: true, outputLayout: OUTPUT_LAYOUT,
+      autoApprove: false, autoContinue: true, autoCheck: true, libraryIncludeMissing: true, outputLayout: OUTPUT_LAYOUT,
       pdfScrub: { enabled: true, user: true, timestamp: true, strings: 'D7MASALL' },
       files: { docJson: false, attCsv: false, histCsv: false, histJson: false, manifest: false } },
     run: null,          // {n, i, total, label, paused, cancel}
@@ -68,7 +68,7 @@
     const oldFileDefaults = saved.outputLayout === undefined && (!saved.files || Object.keys(S.settings.files).every(k => saved.files[k] !== false));
     S.settings = { ...S.settings, ...saved, outputLayout: OUTPUT_LAYOUT,
       files: { ...S.settings.files, ...(oldFileDefaults ? {} : saved.files || {}) },
-      pdfScrub: { ...S.settings.pdfScrub, ...(saved.pdfScrub || {}) } };
+      pdfScrub: { ...S.settings.pdfScrub, ...(saved.pdfScrub || {}), enabled: true, timestamp: true } };
     if (saved.delayMaxMs === undefined) {   // pre-1.3 settings had one fixed delay (default 250 ms)
       S.settings.delayMs = Math.max(+saved.delayMs || 0, 2000); S.settings.delayMaxMs = S.settings.delayMs + 3000;
     }
@@ -133,7 +133,7 @@
       S.resume = { ...r, exporter: exportDoc, finish: r.kind === 'bulk' ? o => finishBatch(r.n, o) : o => finishSingle(r.sg, o) };
       view = r.kind === 'bulk' ? 'bulk' : 'single';
     }
-    if (S.pending || S.resume) setMsg(S.pending ? `${S.pending.fname} from before the page was reloaded is still waiting for approval.` : `The interrupted download from before the page was reloaded can be resumed.`);
+    if (S.pending || S.resume) { section = 'advanced'; setMsg(S.pending ? `${S.pending.fname} from before the page was reloaded is still waiting for approval.` : `The interrupted download from before the page was reloaded can be resumed.`); }
   }
   const saveIndex = () => persistProgress();
   const saveDone = () => persistProgress();
@@ -408,7 +408,7 @@
   }
   // auto: the check that runs when TIPS loads – no prompts, no progress messages, and the drawer message is only
   // replaced when something was found.
-  async function refreshIndex(full = false, auto = false) {
+  async function refreshIndex(full = false, auto = false, syncFolder = true) {
     if (S.checking || busy() || (S.single && S.single.phase === 'looking')) return null;
     if (auto) { if (!S.index.length || !sessionOK()) return null; }
     else {
@@ -455,7 +455,7 @@
         ? `${fresh.length} new topic(s) appended at the end${names(fresh)}; ${updated} topic(s) have a newer version${names(upd)}` + (reexport ? ` – ${reexport} already-exported one(s) re-queued` : '') + '.'
         : 'no new or updated topics.') + short + (auto ? '' : badNote));
       return S.lastCheck;
-    } finally { S.checking = false; render(); if (checked) queueDocumentsSync(); }
+    } finally { S.checking = false; render(); if (checked && syncFolder) queueDocumentsSync(); }
   }
   // Topics found by the last check that still wait to be exported (badge on the page button).
   const checkPending = () => { const lc = S.lastCheck; if (!lc || !lc.ids) return 0; const ids = new Set(lc.ids.map(String)); return S.index.filter(x => ids.has(String(x.tipsId)) && !S.done[x.tipsId]).length; };
@@ -509,7 +509,13 @@
     catch (e) { S.documentInventory = null; S.documentResult = e.message; }
     finally { S.documentRun = null; render(); }
   }
-  async function updateDocuments({ auto = false, retryExceptions = false } = {}) {
+  async function syncLibrary() {
+    if (busy() || S.checking || S.single?.phase === 'looking' || !S.documents.configured || !S.index.length) return;
+    clearTimeout(documentsTimer);
+    const checked = await refreshIndex(false, false, false);
+    if (checked) await updateDocuments({ includeMissing: S.settings.libraryIncludeMissing });
+  }
+  async function updateDocuments({ auto = false, retryExceptions = false, includeMissing } = {}) {
     if (busy() || S.checking || S.single?.phase === 'looking' || !S.documents.configured) return;
     if (!sessionOK()) { S.documentResult = 'Open a TIPS topic to detect your session, then update again.'; render(); return; }
     const client = window.TIPSDocumentsClient;
@@ -521,7 +527,8 @@
     let started = false, active = null;
     const check = () => { if (run.cancel) throw Error('Folder update stopped.'); };
     try {
-      const planned = await documentsRequest('start', { token: run.token, snapshot: documentsSnapshot(), options: { auto, retryExceptions, includeMissing: !auto && (S.documentsIncludeMissing || retryExceptions) } });
+      const planned = await documentsRequest('start', { token: run.token, snapshot: documentsSnapshot(), options: { auto, retryExceptions,
+        includeMissing: includeMissing ?? (!auto && (S.documentsIncludeMissing || retryExceptions)) } });
       started = true; await acceptDocumentInventory(planned.inventory);
       const indexed = new Map(S.index.map(x => [x.tips.toUpperCase(), x]));
       const eligible = planned.topics.filter(t => indexed.has(t.tips));
@@ -581,7 +588,7 @@
         try { await documentsRequest('end', { token: run.token, summary }); }
         catch (e) { summary.errors.push(e.message); }
       }
-      S.documentResult = run.cancel ? 'Update stopped. Completed files were kept.' : started && !run.total ? 'No documents selected for download. No TIPS requests made. See the inventory for any unresolved discrepancies.' : `${summary.topics} document(s) processed · ${summary.pdfs} PDF(s) and ${summary.attachments} attachment(s) added · ${summary.skipped} unchanged file(s) skipped.`;
+      S.documentResult = run.cancel ? 'Update stopped. Completed files were kept.' : started && !run.total ? 'No documents selected for download. No document requests made. See the inventory for any unresolved discrepancies.' : `${summary.topics} document(s) processed · ${summary.pdfs} PDF(s) and ${summary.attachments} attachment(s) added · ${summary.skipped} unchanged file(s) skipped.`;
       if (summary.skippedTopics) S.documentResult += ` ${summary.skippedTopics} unchanged document(s) skipped without TIPS requests.`;
       if (summary.errors.length) S.documentResult += ` ${summary.errors.length} issue(s):\n` + summary.errors.slice(0, 100).join('\n');
       if (started) {
@@ -598,7 +605,7 @@
     documentsTimer = setTimeout(() => {
       if (!S.documents.configured || !S.documents.auto) return;
       if (busy() || S.checking || S.single?.phase === 'looking') { queueDocumentsSync(); return; }
-      updateDocuments({ auto: true }).catch(e => { S.documentResult = e.message; render(); });
+      updateDocuments({ auto: true, includeMissing: S.settings.libraryIncludeMissing }).catch(e => { S.documentResult = e.message; render(); });
     }, 1000);
   }
 
@@ -653,12 +660,12 @@
   // ---------------------------------------------------------------- PDF downloads
   function pdfScrubPolicy() {
     const s = S.settings.pdfScrub;
-    const strings = String(s.strings || '').split(/[\n,]+/).map(x => x.trim()).filter(Boolean);
+    const strings = ['D7MASALL', ...String(s.strings || '').split(/[\n,]+/).map(x => x.trim()).filter(Boolean)];
     if (s.user && S.settings.user) strings.push(String(S.settings.user).trim());
-    return { enabled: !!s.enabled, timestamp: !!s.timestamp, strings: [...new Set(strings.filter(Boolean))] };
+    return { enabled: true, timestamp: true, strings: [...new Set(strings.filter(Boolean))], requiredCleanup: 1 };
   }
   function compatiblePdfPolicy(policy) {
-    return !S.settings.pdfScrub.enabled || JSON.stringify(policy) === JSON.stringify(pdfScrubPolicy());
+    return JSON.stringify(policy) === JSON.stringify(pdfScrubPolicy());
   }
   function isPdfDownload(name, response, data) {
     if (/\.pdf$/i.test(name) || /^application\/(?:x-)?pdf\b/i.test(ctype(response))) return true;
@@ -1046,7 +1053,7 @@
   const host = document.createElement('div');
   host.style.cssText = 'position:fixed;z-index:2147483000;top:0;left:0;width:0;height:0;';
   const root = host.attachShadow({ mode: 'open' });
-  let visible = false, justOpened = false, showSettings = false, liText = '', view = 'single';   // view: 'single' | 'bulk'
+  let visible = false, justOpened = false, showSettings = false, liText = '', view = 'single', section = 'library';
   let railFlash = 0, lastView = 'single';
   let sDraft = {};   // unsaved Settings edits, kept across re-renders until Save / close / Re-detect
   const EXT_VERSION = (hasChrome && chrome.runtime && chrome.runtime.getManifest && chrome.runtime.getManifest().version) || 'dev';
@@ -1056,6 +1063,7 @@
   const css = `
   :host{all:initial}
   *{box-sizing:border-box}
+  [hidden]{display:none!important}
   .dim,.dr,.pk{--f:"Mercedes-Benz Corpo S Text Regular","XF CorpoS normal",Arial,sans-serif;--ft:"Mercedes-Benz Corpo A Title Condensed","XF CorpoA normal",Georgia,serif;
     --tx:#333333;--lab:#595959;--dis:#9b9b9b;--blue:#006EFF;--blueH:#0058cc;--blueP:#002c66;--soft:#e6f1ff;--sel:#cce2ff;--softP:#99c5ff;
     --grey:#595959;--greyH:#474747;--bar:#dedede;--barB:#cdcdcd;--stroke:#7a7a7a;--div:#dedede;--row2:#eeeeee;
@@ -1077,6 +1085,7 @@
   .note{flex:none;display:flex;gap:8px;align-items:flex-start;margin:12px 20px 0;padding:8px 12px;background:var(--soft);font-size:13px}
   .note span{flex:1} .note button{border:0;background:none;cursor:pointer;font-size:16px;line-height:1;color:var(--lab);padding:0}
   .body{flex:1;min-height:0;overflow:auto;padding:16px 20px 20px;display:flex;flex-direction:column;gap:16px}
+  #library_panel,#advanced_panel{display:flex;flex-direction:column;gap:16px}
   .body::-webkit-scrollbar{width:6px}.body::-webkit-scrollbar-thumb{background:#cacaca;border-radius:1ex}
   .ft{flex:none;min-height:64px;display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 16px 10px 20px;background:var(--row2);flex-wrap:wrap}
   .sess{display:flex;align-items:center;gap:6px;font-size:13px;color:var(--lab)} .acts{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end;margin-left:auto}
@@ -1285,6 +1294,23 @@
   }
 
   // ---- bulk
+  function vLibrary() {
+    const disabled = busy() || S.checking || S.single?.phase === 'looking', s = S.documents;
+    return `<div class="sec"><h3>Local LI library</h3>
+      <span>Keep your saved LIs and attachments up to date in their existing folders.</span>
+      <span class="okc sm">PDF cleanup required · D7MASALL · download / print timestamps · metadata</span>
+      <span class="mut sm">Document revision dates are kept. Older saved files are preserved.</span>
+      <div class="card"><div class="bd"><b>Documents folder</b><span class="mut sm">${esc(s.configured ? s.folderName + ' / [LI folder] / ' + s.attachmentFolder : 'Choose the parent folder containing your saved LIs.')}</span>
+        <b>Index log</b><span class="mut sm">${esc(folderDetails())}</span></div></div>
+      <button class="b bar" id="library_folders" ${disabled ? 'disabled' : ''}>Folder settings</button>
+      <label class="ck"><input type="checkbox" id="library_auto" ${s.auto ? 'checked' : ''} ${disabled || !s.configured ? 'disabled' : ''}> Automatically sync when TIPS opens</label>
+      <label class="ck"><input type="checkbox" id="library_missing" ${S.settings.libraryIncludeMissing ? 'checked' : ''} ${disabled ? 'disabled' : ''}> Download indexed documents missing from this folder</label>
+      <span class="mut sm">Sync checks recent index changes, then downloads only changed or missing files. TIPS must be open and logged in.</span>
+      ${!S.index.length ? '<span class="alc sm">Select your existing index in Folder settings. To start a new catalogue, use Advanced → Bulk export → Build index.</span>' : `<span class="mut sm">${fmtN(S.index.length)} indexed documents${S.lastCheck ? ' · Last check ' + esc(when(S.lastCheck.at)) : ''}</span>`}
+      ${folderProblem() ? `<span class="alc sm">${esc(S.folder.message || 'Index synchronization needs attention. Open Folder settings.')}</span>` : ''}
+      ${S.run || S.pending || S.resume ? '<div class="card"><span>A manual ZIP export needs attention.</span><button class="b bar sm" id="library_export">Open Advanced</button></div>' : ''}
+      </div>${vDocuments()}`;
+  }
   function vDocuments() {
     const s = S.documents, run = S.documentRun, a = S.documentInventory;
     const disabled = busy() || S.checking || S.single?.phase === 'looking' || !s.configured;
@@ -1300,14 +1326,12 @@
         ${problems.length || a.issues.length ? `<details><summary>Discrepancies (${problems.length + a.issues.length})</summary><pre>${esc([...a.issues, ...problems.slice(0, 100).map(r => `${r.tips}: ${r.folderStatus}; log ${r.indexStatus}${r.missing.length ? '; missing v' + r.missing.slice(0, 30).join(', v') : ''}${r.invalid.length ? '; invalid v' + r.invalid.join(', v') : ''}${r.missingAttachments.length ? '; missing attachments: ' + r.missingAttachments.join(', ') : ''}${r.notes.length ? '; ' + r.notes.join('; ') : ''}\n${r.path || '(no folder)'}`)].join('\n'))}</pre>${problems.length > 100 ? '<span class="mut sm">First 100 shown. Download the full inventory CSV for every document.</span>' : ''}</details>` : '<span class="okc">All required PDF versions found; excluded versions are listed below. See the attachment note above.</span>'}
         <button class="b bar sm" id="doc_report">Download inventory CSV</button></div>`;
     }
-    return `<div class="sec" style="border-top:1px solid var(--div);padding-top:16px"><h3>Saved documents</h3>
-      <span class="mut">${esc(s.configured ? s.folderName + ' / [document folder] / ' + s.attachmentFolder : 'Choose your documents folder in Settings to inventory and update saved LI/GI documents.')}</span>
-      <span class="mut sm">${s.configured && s.auto ? 'Automatic updates after Check new are on. ' : ''}Older PDFs and attachments are kept. Changed attachments get versioned names.</span>
-      <span class="mut sm">Updates request only indexed changes and missing files. Complete, unchanged documents are skipped. Use Check new to refresh the index first.</span>
+    return `<div class="sec" style="border-top:1px solid var(--div);padding-top:16px"><h3>Inventory &amp; status</h3>
       <span class="mut sm">Scan &amp; verify inventories local attachments into the main index log without TIPS requests.</span>
-      <div class="grid2"><button class="b bar" id="doc_scan" ${disabled ? 'disabled' : ''}>Scan &amp; verify</button><button class="b pri" id="doc_update" ${disabled ? 'disabled' : ''}>Update saved documents</button></div>
+      <button class="b bar" id="doc_scan" ${disabled ? 'disabled' : ''}>Scan &amp; verify</button>
+      <details><summary>Folder repair options</summary><button class="b bar" id="doc_update" ${disabled ? 'disabled' : ''}>Repair using current index</button>
       <label class="ck"><input type="checkbox" id="doc_missing" ${S.documentsIncludeMissing ? 'checked' : ''} ${disabled ? 'disabled' : ''}> Include missing documents from index in a manual update</label>
-      <button class="b bar sm" id="doc_folder" ${busy() || S.checking ? 'disabled' : ''}>Choose / change documents folder…</button>
+      <button class="b bar sm" id="doc_folder" ${busy() || S.checking ? 'disabled' : ''}>Choose / change documents folder…</button></details>
       ${run ? `<span role="status">${esc(run.label)}</span>${!run.scan ? `<button class="b dan" id="doc_stop" ${run.cancel ? 'disabled' : ''}>${run.cancel ? 'Stopping…' : 'Stop folder update'}</button>` : ''}` : ''}
       <pre class="sm" id="doc_status" role="status" style="white-space:pre-wrap">${esc(S.documentResult || s.message || '')}</pre>${report}
       <details id="doc_exceptions"><summary>Index errors and exceptions (${exceptions.length})</summary>
@@ -1328,7 +1352,7 @@
     let actions = '';
     const toggles = `<div class="rule"><label class="tg">Auto-continue after each download<input type="checkbox" class="tgl" id="autoc" ${s.autoContinue ? 'checked' : ''}></label>
         <label class="tg">Auto-approve (download without asking)<input type="checkbox" class="tgl" id="autoa" ${s.autoApprove ? 'checked' : ''}></label>
-        <label class="tg">Check for new topics whenever TIPS loads<input type="checkbox" class="tgl" id="autock" ${s.autoCheck ? 'checked' : ''}></label></div>`;
+        ${S.documents.configured ? '<span class="mut sm">Automatic checks follow the Library sync setting.</span>' : `<label class="tg">Check for new topics whenever TIPS loads<input type="checkbox" class="tgl" id="autock" ${s.autoCheck ? 'checked' : ''}></label>`}</div>`;
     if (run) {
       body += `<div class="sec"><div class="sp"><h3>${esc(run.title)}${run.paused ? ' <span class="alc" style="font:14px var(--f)">· paused</span>' : ''}</h3><span style="font-size:16px">Document ${run.i} of ${run.total}</span></div>
           ${pbar(100 * (run.i - 1) / run.total, false, 'pbar')}</div>
@@ -1358,25 +1382,25 @@
           ${S.history.slice().reverse().map(x => `<tr><td>${x.n}</td><td>${x.sizeMB} MB</td><td>${x.ok}/${x.docs}</td><td>${x.att}</td><td>${x.prev}</td><td>${x.errors}</td></tr>`).join('')}</table></details>`;
       actions = `<button class="b pri" id="prep" ${!S.index.length || !nb || ck ? 'disabled' : ''}>${I.dl}${nb ? `Prepare batch ${nb} · ${Math.min(s.batchSize, pendN)} documents` : S.index.length ? 'Everything exported' : 'Build the index first'}</button>`;
     }
-    body += vDocuments();
     return { body, actions };
   }
 
   // ---- settings
   function vSettings() {
     const s = S.settings;
-    const body = `<h3>Settings</h3>
+    const body = `<h3>Settings</h3><details id="settings_export"><summary>Advanced export and session settings</summary>
       <label class="fld">Batch size <input class="s" type="number" id="s_bs" value="${s.batchSize}" min="1" max="500"></label>
       <label class="fld">Delay between documents (ms) <span class="pair"><input class="s" type="number" id="s_delay" value="${s.delayMs}" min="0" step="250" aria-label="Minimum delay"> – <input class="s" type="number" id="s_delay2" value="${s.delayMaxMs}" min="0" step="250" aria-label="Maximum delay"></span></label>
       <label class="fld">Search page size <span class="pair"><span class="${s.pageSizeSrc === 'detected' ? 'okc' : s.pageSizeSrc === 'manual' ? 'mut' : 'alc'}">${s.pageSizeSrc === 'detected' ? '✓ matches TIPS' : s.pageSizeSrc === 'manual' ? 'set manually' : 'not detected yet'}</span><input class="s" type="number" id="s_ps" value="${s.pageSize}" min="1" max="500"></span></label>
       <label class="fld">Outlet <input type="text" id="s_outlet" value="${esc(s.outlet)}"></label>
       <label class="fld">User <input type="text" id="s_user" value="${esc(s.user)}" ${busy() && s.pdfScrub.enabled ? 'disabled' : ''}></label>
-      <label class="fld">Reader version <input type="text" id="s_ver" value="${esc(s.ver)}"></label>
+      <label class="fld">Reader version <input type="text" id="s_ver" value="${esc(s.ver)}"></label></details>
       <div class="sec" style="padding-top:12px;border-top:1px solid var(--div)"><b>PDF scrubbing</b>
-        <label class="ck"><input type="checkbox" id="s_pdfEnabled" ${s.pdfScrub.enabled ? 'checked' : ''} ${busy() ? 'disabled' : ''}> Automatically scrub PDFs before saving</label>
+        <label class="ck"><input type="checkbox" id="s_pdfEnabled" checked disabled> Required PDF cleanup before saving</label>
+        <span class="mut">Always removes D7MASALL, recognized download/print timestamps, and document metadata. Applies to library updates and Advanced ZIP exports.</span>
         <span class="mut">Applies to new current PDFs, prior versions and PDF attachments saved to ZIPs or the documents folder. Removes document metadata locally before saving.</span>
         <label class="ck"><input type="checkbox" id="s_pdfUser" ${s.pdfScrub.user ? 'checked' : ''} ${busy() ? 'disabled' : ''}> Remove the detected session user ID</label>
-        <label class="ck"><input type="checkbox" id="s_pdfTimestamp" ${s.pdfScrub.timestamp ? 'checked' : ''} ${busy() ? 'disabled' : ''}> Remove the print date and time stamp</label>
+        <label class="ck"><input type="checkbox" id="s_pdfTimestamp" checked disabled> Remove download / print date and time stamps</label>
         <label class="sec" style="gap:6px">Additional text to remove (one per line or comma-separated)
           <textarea id="s_pdfStrings" rows="2" spellcheck="false" ${busy() ? 'disabled' : ''}>${esc(s.pdfScrub.strings)}</textarea>
         </label>
@@ -1390,10 +1414,10 @@
       </div>
       <div class="sec" style="padding-top:12px;border-top:1px solid var(--div)"><b>Documents folder</b>
         <span class="mut">${esc(S.documents.configured ? S.documents.folderName : 'No documents folder selected')}</span>
-        <span class="mut sm">Inventory saved LI/GI documents against the index log, add missing PDF versions and keep older attachments. Scan and update controls are in Bulk export.</span>
+        <span class="mut sm">Inventory saved LI/GI documents against the index log, add missing PDF versions and keep older attachments. Sync and scan controls are in Library.</span>
         <button class="b bar" id="s_documentsFolder" ${busy() || S.checking ? 'disabled' : ''}>Choose / change documents folder…</button>
       </div>
-      <div class="sec" style="padding-top:12px;border-top:1px solid var(--div)"><b>Data files to include</b><span class="mut">All PDF versions share the topic folder; attachments go in Attachments and Links. Optional data files are off by default. Any failures are listed in the export errors.</span>
+      <details id="settings_zip"><summary>Advanced ZIP contents</summary><div class="sec"><b>Data files to include</b><span class="mut">All PDF versions share the topic folder; attachments go in Attachments and Links. Optional data files are off by default. Any failures are listed in the export errors.</span>
         <div class="fgrid">
           <label class="ck"><input type="checkbox" id="f_docJson" ${s.files.docJson ? 'checked' : ''}> Document data <code>.json</code></label>
           <label class="ck"><input type="checkbox" id="f_histCsv" ${s.files.histCsv ? 'checked' : ''}> Revision history <code>.csv</code></label>
@@ -1404,7 +1428,7 @@
         </div>
         <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="b bar sm" id="f_all">All</button><button class="b bar sm" id="f_csv">CSV only</button><button class="b bar sm" id="f_json">JSON only</button><button class="b bar sm" id="f_none">None</button></div>
         ${!s.files.attCsv ? '<span class="alc sm">Links to other LIs are only recorded in the links list CSV.</span>' : ''}
-      </div>
+      </div></details>
       <div class="sec" style="padding-top:12px;border-top:1px solid var(--div)"><b>Check setup</b>
         <span class="mut">Checks that the exporter can find everything it needs on this TIPS page.</span>
         ${diag ? `<div class="kv">${diag.map(([ok, a, b]) => `<div><span>${ok === true ? '<span class="okc">✓</span>' : ok === false ? '<span class="erc">✗</span>' : '<span class="mut">–</span>'} ${esc(a)}</span><span>${esc(b)}</span></div>`).join('')}</div>` : ''}
@@ -1437,9 +1461,11 @@
     // keep typing focus and scroll position across re-renders
     const ae = root.activeElement, focusId = ae && ae.id, focusLi = focusId === 'li';
     let selA = 0, selB = 0; try { if (ae && typeof ae.selectionStart === 'number') { selA = ae.selectionStart; selB = ae.selectionEnd; } } catch (e) { }
-    const oldBody = root.querySelector('.body'), scroll = oldBody && lastView === view ? oldBody.scrollTop : 0; lastView = view;
+    const openDetails = [...root.querySelectorAll('details[id]')].map(el => [el.id, el.open]);
+    const viewKey = showSettings ? 'settings' : section + '/' + view;
+    const oldBody = root.querySelector('.body'), scroll = oldBody && lastView === viewKey ? oldBody.scrollTop : 0; lastView = viewKey;
     const s = S.settings, run = S.run, T = topOffset();
-    const status = run ? (run.kind === 'single' ? '<span class="st acc">● Downloading</span>' : run.paused ? `<span class="st alc">● ${esc(run.title)} paused</span>` : `<span class="st acc">● ${esc(run.title)} running</span>`)
+    const status = S.documentRun ? `<span class="st acc">● ${S.documentRun.scan ? 'Scanning locally' : 'Syncing library'}</span>` : run ? (run.kind === 'single' ? '<span class="st acc">● Downloading</span>' : run.paused ? `<span class="st alc">● ${esc(run.title)} paused</span>` : `<span class="st acc">● ${esc(run.title)} running</span>`)
       : S.pending ? '<span class="st okc">● Awaiting approval</span>' : view === 'single' && S.single && S.single.phase === 'done' ? '<span class="st okc">● Saved</span>' : '';
     const v = showSettings ? vSettings() : view === 'bulk' ? vBulk() : vSingle();
     if (S.resume && !S.run) {   // an interrupted download waits for the user, whatever tab is open
@@ -1452,15 +1478,18 @@
         <div class="hd"><div class="ttl"><h2>TIPS Exporter</h2>${status}</div>
           <div class="hb"><button class="ib" id="gear" aria-label="Settings" aria-pressed="${showSettings}">${svg('<circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>', 22, 1.5)}</button>
             <span class="sep"></span><button class="ib" id="close" aria-label="Close">${svg('<path d="M18 6L6 18"></path><path d="M6 6l12 12"></path>', 22, 1.5)}</button></div></div>
-        <div class="tabs" role="tablist"><button class="tab" role="tab" id="tosingle" aria-selected="${view === 'single'}">Single LI</button><button class="tab" role="tab" id="tobulk" aria-selected="${view === 'bulk'}">Bulk export</button></div>
+        <div class="tabs" role="tablist" aria-label="Extension sections"><button class="tab" role="tab" id="tolibrary" aria-selected="${!showSettings && section === 'library'}">Library</button><button class="tab" role="tab" id="toadvanced" aria-selected="${!showSettings && section === 'advanced'}">Advanced</button></div>
         ${S.msg ? `<div class="note" role="status"><span>${esc(S.msg)}</span><button id="msgx" aria-label="Dismiss message">×</button></div>` : ''}
-        <div class="body" id="body">${v.body}</div>
+        <div class="body" id="body">${showSettings ? v.body : `<div id="library_panel" ${section !== 'library' ? 'hidden' : ''}>${vLibrary()}</div>
+          <div id="advanced_panel" ${section !== 'advanced' ? 'hidden' : ''}><div class="tabs" role="tablist" aria-label="Manual ZIP exports"><button class="tab" role="tab" id="tosingle" aria-selected="${view === 'single'}">Single LI</button><button class="tab" role="tab" id="tobulk" aria-selected="${view === 'bulk'}">Bulk export</button></div>${v.body}</div>`}</div>
         <div class="ft"><span class="sess">${sessionOK() ? `<span class="okc" style="display:flex">${svg('<path d="M20 6L9 17l-5-5"></path>', 16, 2.4)}</span>Session OK · ${esc(s.user)}` : `<span class="alc" style="display:flex">${svg('<path d="M12 9v4"></path><path d="M12 17h.01"></path><path d="M10.3 3.9L1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"></path>', 16, 2)}</span>Session not detected – open any topic once, or check ⚙`}</span>
 <span class="mut sm">v${esc(EXT_VERSION)}</span>
-          <div class="acts">${v.actions}</div></div>
+          ${!showSettings ? `<div class="acts" ${section !== 'library' ? 'hidden' : ''}><button class="b pri" id="library_sync" ${busy() || S.checking || S.single?.phase === 'looking' || !S.documents.configured || !S.index.length ? 'disabled' : ''}>${S.checking ? 'Checking changes…' : 'Sync now'}</button></div>` : ''}
+          <div class="acts" ${!showSettings && section !== 'advanced' ? 'hidden' : ''}>${v.actions}</div></div>
       </aside>`;
     const focusOnOpen = justOpened; justOpened = false;
     const $ = id => root.getElementById(id);
+    for (const [id, open] of openDetails) if ($(id)?.tagName === 'DETAILS') $(id).open = open;
     const on = (id, ev, fn) => { const el = $(id); if (el) el[ev] = fn; };
     const safeRun = fn => async () => { try { await fn(); } catch (e) { setMsg((e instanceof SessionError ? '⚠ ' : 'Error: ') + e.message); } };
     const focusBox = () => { const t = $('li'); if (t) { t.focus(); t.selectionStart = t.selectionEnd = t.value.length; } };
@@ -1468,11 +1497,18 @@
     on('close', 'onclick', () => openDrawer(false));
     on('gear', 'onclick', () => { showSettings = !showSettings; sDraft = {}; render(); });
     on('msgx', 'onclick', () => { S.msg = ''; render(); });
-    on('tobulk', 'onclick', () => { view = 'bulk'; showSettings = false; render(); });
-    on('tosingle', 'onclick', () => { view = 'single'; showSettings = false; render(); });
+    on('tolibrary', 'onclick', () => { section = 'library'; showSettings = false; render(); });
+    on('toadvanced', 'onclick', () => { section = 'advanced'; showSettings = false; render(); });
+    on('library_export', 'onclick', () => { section = 'advanced'; showSettings = false; render(); });
+    on('tobulk', 'onclick', () => { section = 'advanced'; view = 'bulk'; showSettings = false; render(); });
+    on('tosingle', 'onclick', () => { section = 'advanced'; view = 'single'; showSettings = false; render(); });
+    on('library_sync', 'onclick', safeRun(syncLibrary));
+    on('library_folders', 'onclick', openFolderSettings);
+    on('library_auto', 'onchange', safeRun(async () => { await documentsRequest('set-auto', { auto: $('library_auto').checked }); render(); }));
+    on('library_missing', 'onchange', async e => { s.libraryIncludeMissing = e.target.checked; await saveSettings(); });
 
     // single LI
-    const lookup = safeRun(() => lookupSpecific(liText));
+    const lookup = safeRun(() => { section = 'advanced'; return lookupSpecific(liText); });
     const dlFound = safeRun(downloadFound);
     on('li', 'oninput', e => { liText = e.target.value; if (S.single && S.single.phase === 'looked') { S.single = null; render(); } });
     on('li', 'onkeydown', e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); lookup(); } });
@@ -1540,9 +1576,9 @@
     });
     const FK = ['docJson', 'histCsv', 'histJson', 'attCsv', 'manifest'];
     const readPdfBoxes = () => {
-      s.pdfScrub.enabled = $('s_pdfEnabled').checked;
+      s.pdfScrub.enabled = true;
       s.pdfScrub.user = $('s_pdfUser').checked;
-      s.pdfScrub.timestamp = $('s_pdfTimestamp').checked;
+      s.pdfScrub.timestamp = true;
       s.pdfScrub.strings = $('s_pdfStrings').value;
     };
     for (const id of ['s_pdfEnabled', 's_pdfUser', 's_pdfTimestamp']) on(id, 'onchange', async () => {
@@ -1566,9 +1602,9 @@
 
     if (showSettings) for (const id of S_FIELDS) { const el = $(id); if (!el) continue; if (id in sDraft) el.value = sDraft[id]; el.addEventListener('input', () => { sDraft[id] = el.value; }); }
     // keep keyboard focus (and the caret) on the same control across re-renders, e.g. while a batch progresses
-    if (focusId && !focusOnOpen) { const el = $(focusId); if (el && !el.disabled) { el.focus(); try { if (typeof el.selectionStart === 'number') el.setSelectionRange(selA, selB); } catch (e) { } } }
+    if (focusId && !focusOnOpen) { const el = $(focusId); if (el && !el.disabled && !el.closest('[hidden]')) { el.focus(); try { if (typeof el.selectionStart === 'number') el.setSelectionRange(selA, selB); } catch (e) { } } }
     root.querySelector('.body').scrollTop = scroll;
-    if (focusOnOpen) { const t = $('li') && !$('li').disabled ? $('li') : root.querySelector('.dr ' + FOCUSABLE.split(',').join(',.dr ')); if (t) t.focus(); }
+    if (focusOnOpen) { const preferred = showSettings ? $('gear') : section === 'library' ? !$('library_sync')?.disabled ? $('library_sync') : $('library_folders') : $('li'); const t = preferred && !preferred.disabled ? preferred : $('close'); if (t) t.focus(); }
     syncToolbar();
   }
   const cancelRun = () => { if (S.run) { S.run.cancel = true; S.run.paused = false; } };
@@ -1694,7 +1730,7 @@
     $('n_x').onclick = $('n_later').onclick = $('n_dim').onclick = closeNotice;
     for (const a of nroot.querySelectorAll('.nr')) a.addEventListener('click', closeNotice);
     $('n_go').onclick = () => {
-      closeNotice(); view = 'bulk'; showSettings = false; openDrawer(true);
+      closeNotice(); section = 'advanced'; view = 'bulk'; showSettings = false; openDrawer(true);
       if (inNext && nb && !busy()) prepareBatch().catch(e => setMsg((e instanceof SessionError ? '⚠ ' : 'Error: ') + e.message));
     };
     if (!noteOpen) { noteReturn = document.activeElement; window.addEventListener('keydown', noteKey, true); }
@@ -2037,12 +2073,12 @@
   // session is known. One search request in the usual case; silent unless something new or updated turns up, which
   // opens the "New in TIPS" popup.
   async function autoCheckOnLoad() {
-    if (!S.settings.autoCheck || !S.index.length) return;
+    if (!(S.documents.configured ? S.documents.auto : S.settings.autoCheck) || !S.index.length) return;
     for (let i = 0; i < 30 && !sessionOK(); i++) { await sleep(1000); detectSession(); }
     if (!sessionOK()) return;
     await sleep(1500);   // let the Reader's own first requests go first
-    if (busy()) return;
-    try { const r = await refreshIndex(false, true); if (r && r.items && r.items.length && !busy()) showNotice(r); }
+    if (busy() || !(S.documents.configured ? S.documents.auto : S.settings.autoCheck)) return;
+    try { const r = await refreshIndex(false, true); if (!S.documents.configured && r && r.items && r.items.length && !busy()) showNotice(r); }
     catch (e) { console.warn('TIPS Exporter: check when TIPS loaded failed –', e.message); }
   }
   // Late detection: the Reader fires its first API calls after load

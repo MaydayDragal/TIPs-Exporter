@@ -58,8 +58,7 @@ function makeEnv(extra = {}, body = '', settings = {}) {
   w.confirm = () => true; w.fetch = fakeFetch;
   const pm = w.postMessage.bind(w);
   w.postMessage = (d, o) => { if (d && d.__tipsx) setTimeout(() => w.dispatchEvent(new w.MessageEvent('message', { data: d, source: w })), 0); else pm(d, o); };
-  // These legacy endpoint fixtures use zero-filled dummy PDFs; real scrubbing is covered by pdf-scrub.test.js.
-  st.settings = { pdfScrub: { enabled: false }, ...st.settings };
+  require('./helpers/pdf-fixture').installPdfFixtures(w);
   w.eval(probe); w.eval(fs.readFileSync(require('path').join(__dirname, '..', 'index-csv.js'), 'utf8')); w.eval(content);
   const root = () => [...w.document.documentElement.children].find(e => e.shadowRoot).shadowRoot;
   const env = { w, st, saved, root, $: id => root().getElementById(id) };
@@ -69,7 +68,7 @@ function makeEnv(extra = {}, body = '', settings = {}) {
   return env;
 }
 async function unzip(w, blob) {
-  const ab = await new Promise((res, rej) => { const fr = new w.FileReader(); fr.onload = () => res(fr.result); fr.onerror = rej; fr.readAsArrayBuffer(blob); });
+  const ab = await blob.arrayBuffer();
   const buf = new Uint8Array(ab), dv = new DataView(buf.buffer), names = [];
   for (let o = 0; o + 30 <= buf.length && dv.getUint32(o, true) === 0x04034b50;) {
     const size = dv.getUint32(o + 18, true), nl = dv.getUint16(o + 26, true), xl = dv.getUint16(o + 28, true);

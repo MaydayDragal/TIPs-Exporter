@@ -16,8 +16,7 @@ function makeEnv({ fetch, extra = {}, settings = {}, body = '', storeDelay = 0, 
   w.HTMLAnchorElement.prototype.click = function () { saved[saved.length - 1].name = this.download; };
   w.chrome = { storage: { local: { get: async k => ({ [k]: JSON.parse(JSON.stringify(st[k] ?? null)) ?? undefined }), set: async o => { if (storeDelay) await tick(storeDelay); Object.assign(st, JSON.parse(JSON.stringify(o))); } } }, runtime: { getManifest: () => ({ version: 'qa' }), onMessage: { addListener(fn) { w.__toggle = fn; } } } };
   w.confirm = () => true; w.fetch = fetch; if (idb) w.indexedDB = idb; if (shared) Object.assign(st, shared);
-  // These legacy endpoint fixtures use zero-filled dummy PDFs; real scrubbing is covered by pdf-scrub.test.js.
-  st.settings = { pdfScrub: { enabled: false }, ...st.settings };
+  require('./helpers/pdf-fixture').installPdfFixtures(w);
   w.eval(probe); w.eval(fs.readFileSync(require('path').join(__dirname, '..', 'index-csv.js'), 'utf8')); w.eval(content);
   const shadows = () => [...w.document.documentElement.children].filter(e => e.shadowRoot).map(e => e.shadowRoot);
   const root = () => shadows().find(r => r.querySelector('.dr')) || shadows()[0];
@@ -121,7 +120,7 @@ const html = () => ({ ok: true, status: 200, headers: { get: () => 'text/html; c
     s2.w.__toggle({ type: 'toggle' }, null, () => { }); await tick(50);
     ok(!!s2.$('resume') && /Download interrupted – 1 of 3 done/.test(s2.text()), 'reload: the interrupted download can still be resumed');
     s2.$('resume').click(); await waitFor(() => /Saved to Downloads/.test(s2.text()), 30000);
-    const ab = await new Promise(r => { const fr = new s2.w.FileReader(); fr.onload = () => r(fr.result); fr.readAsArrayBuffer(s2.saved[0].blob); });
+    const ab = await s2.saved[0].blob.arrayBuffer();
     const z = Buffer.from(ab).toString('latin1');
     ok(s2.saved[0].name === 'TIPS_selection_' + new Date().toISOString().slice(0, 10) + '_3docs.zip' && /LI42\.10-P-078779_v3\.pdf/.test(z) && /LI20\.10-P-075374_v1\.pdf/.test(z), 'resumed after reload: one zip with all 3 documents (' + s2.saved[0].name + ')');
   }

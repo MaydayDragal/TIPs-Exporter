@@ -213,6 +213,14 @@
         if (await db.get(RUN)) throw Error('A folder update is running. Stop it before changing folder settings.');
         const r = await current(); r.attachmentFolder = leaf(options.attachmentFolder || r.attachmentFolder); r.auto = options.auto !== false; await db.put(KEY, r); return emit(r);
       }),
+      setAuto: auto => typeof auto !== 'boolean' ? Promise.reject(Error('Invalid automatic sync setting.')) : queue(async () => {
+        const r = await db.get(KEY); if (!r) throw Error('Choose a documents folder first.');
+        r.auto = auto; await db.put(KEY, r);
+        const previous = await db.get(STATUS) || {};
+        return emit(r, previous.phase || 'ready', auto ? 'Automatic library sync is on when TIPS opens.' : 'Automatic library sync is paused.',
+          { ...(previous.summary ? { summary: previous.summary } : {}), ...(previous.inventory ? { inventory: previous.inventory } : {}),
+            ...(previous.lastUpdated ? { lastUpdated: previous.lastUpdated } : {}) });
+      }),
       disconnect: () => queue(async () => { if (await db.get(RUN)) throw Error('A folder update is running. Stop it first.'); await db.del(KEY); return emit(null); }),
       status: () => queue(async () => await db.get(STATUS) || emit(await db.get(KEY))),
       active: () => queue(() => db.get(RUN)),
@@ -229,7 +237,7 @@
         if (await db.get(RUN)) throw Error('A documents folder update is already running in another tab.');
         const r = await current(); await cleanupPending(); await rememberIndex(r, snapshot);
         const inventory = await scan(r, snapshot), topics = inventory.topics.map(t => ({ ...t, create: false }));
-        if (options.includeMissing && !options.auto) for (const x of snapshot.index || []) {
+        if (options.includeMissing) for (const x of snapshot.index || []) {
           const row = inventory.rows.find(a => a.tips === x.tips.toUpperCase());
           if (row?.folderStatus === 'missing' || options.retryExceptions && row?.folderStatus === 'excluded' && !row.path) topics.push({ tips: x.tips.toUpperCase(), path: topicFolder(x), versions: [], invalid: [], missingAttachments: [], notes: [], create: true, last: null });
         }
