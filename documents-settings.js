@@ -1,6 +1,6 @@
 (() => {
   const $ = id => document.getElementById(id);
-  let selected = null, current = null, working = false;
+  let selected = null, current = null, working = false, edited = false;   // edited: unsaved changes a status refresh keeps
   const send = (action, extra = {}) => chrome.runtime.sendMessage({ type: 'documents-folder', action, ...extra });
   const note = (message, error = false) => { $('documents-result').textContent = message; $('documents-result').className = error ? 'error' : 'success'; };
   function controls() {
@@ -14,7 +14,7 @@
     const r = await send('status'), s = r?.status;
     $('documents-location').textContent = current ? current.handle.name : 'No documents folder selected';
     $('documents-status').textContent = s?.message || 'Choose the parent containing your saved document folders (LI/GI).';
-    if (current && !selected) { $('documents-attachments').value = current.attachmentFolder; $('documents-auto').checked = current.auto; $('documents-poll-minutes').value = current.pollMinutes ?? 10; }
+    if (current && !selected && !edited) { $('documents-attachments').value = current.attachmentFolder; $('documents-auto').checked = current.auto; $('documents-poll-minutes').value = current.pollMinutes ?? 10; }
     controls();
   }
   async function act(fn) {
@@ -35,15 +35,16 @@
   });
   $('use-documents').onclick = () => act(async () => {
     const options = config(), token = crypto.randomUUID(); await TIPSFolderDB.put('documents-candidate:' + token, { handle: selected });
-    const r = await send('connect', { token, options }); if (r?.ok) selected = null; return r;
+    const r = await send('connect', { token, options }); if (r?.ok) { selected = null; edited = false; } return r;
   });
-  $('save-documents').onclick = () => act(() => send('configure', { options: config() }));
+  $('save-documents').onclick = () => act(async () => { const r = await send('configure', { options: config() }); if (r?.ok) edited = false; return r; });
   $('allow-documents').onclick = () => act(async () => {
     // Request immediately inside the user's click; background work cannot prompt for permission.
     if (await current.handle.requestPermission({ mode: 'readwrite' }) !== 'granted') throw Error('Documents folder access was not granted.');
     return send('inventory');
   });
   $('disconnect-documents').onclick = () => act(() => send('disconnect'));
+  for (const id of ['documents-attachments', 'documents-auto', 'documents-poll-minutes']) for (const type of ['input', 'change']) $(id).addEventListener(type, () => { edited = true; });
   if (chrome.storage.onChanged) chrome.storage.onChanged.addListener((c, area) => { if (area === 'local' && c.documentsFolder && !working) refresh().catch(e => note(e.message, true)); });
   refresh().catch(e => note(e.message, true));
 })();

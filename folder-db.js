@@ -4,7 +4,8 @@
   const open = () => pending || (pending = new Promise((resolve, reject) => {
     const q = indexedDB.open('tips-exporter-index-folder', 1);
     q.onupgradeneeded = () => q.result.createObjectStore('kv');
-    q.onsuccess = () => resolve(q.result); q.onerror = () => { pending = null; reject(q.error); };
+    // Chrome can close the connection (storage cleared, browser shutting down): reopen on the next call instead of failing forever.
+    q.onsuccess = () => { q.result.onclose = q.result.onversionchange = () => { try { q.result.close(); } catch (_) {} pending = null; }; resolve(q.result); }; q.onerror = () => { pending = null; reject(q.error); };
   }));
   const tx = (mode, action) => open().then(db => new Promise((resolve, reject) => {
     const t = db.transaction('kv', mode), request = action(t.objectStore('kv'));

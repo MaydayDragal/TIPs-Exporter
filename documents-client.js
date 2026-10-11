@@ -3,12 +3,15 @@
   const api = factory(); if (typeof module === 'object' && module.exports) module.exports = api; else root.TIPSDocumentsClient = api;
 })(globalThis, () => {
   const CHUNK = 262144;
+  // Suffix on an earlier-version attachment error that will not change on retry (see content.js exportDoc).
+  const PRIOR_NOTE = ' (earlier version; not retried)';
   const excludedVersions = index => (index?.exceptions || []).filter(x => x.kind !== 'retryable').map(x => x.version);
   function classifyErrors(item, errors, at = new Date().toISOString()) {
     const escaped = String(item.tips).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), exceptions = new Map(), remaining = [];
     const unavailable = new RegExp('^' + escaped + ': v([1-9]\\d*) (?:not available in TIPS|PDF HTTP 404)$');
     const scrub = new RegExp('^' + escaped + '[^/]*[/]' + escaped + '_v([1-9]\\d*)\\.pdf: PDF scrub failed \\((encrypted PDF|unsupported, damaged, or unreadable PDF)\\); PDF omitted\\.$');
     for (const message of errors) {
+      if (message.endsWith(PRIOR_NOTE)) continue;   // reported in the summary, but not a reason to retry the LI
       const u = unavailable.exec(message), s = scrub.exec(message), current = message === `${item.tips}: current PDF HTTP 404`;
       const version = u ? +u[1] : s ? +s[1] : current ? +item.version : 0;
       if (!Number.isSafeInteger(version) || version < 1 || version > 10000) { remaining.push(message); continue; }
@@ -38,7 +41,7 @@
   function portableName(value, fallback = '_') {
     let s = String(value ?? '').replace(INVISIBLE, '').replace(BAD_ANYWHERE, '_').replace(/\s+/gu, ' ');
     s = s.replace(/^[\s.]+|[\s.]+$/gu, '');
-    if (SHELL_EXT.test(s)) s = s.replace(SHELL_EXT, '_$1');
+    while (SHELL_EXT.test(s)) s = s.replace(SHELL_EXT, '_$1');   // x.{a}.{b} needs two passes; each pass removes a dot
     if (RESERVED.test(s)) s = '_' + s;
     return s || fallback;
   }
@@ -79,5 +82,5 @@
     for (const issue of inventory.issues) rows.push(['# Scan issue',issue]);
     return rows.map(r => r.map(cell).join(',')).join('\r\n') + '\r\n';
   }
-  return { priorChecked, portableName, portableIssue, write, needsUpdate, needsAttachments, needsPriorAttachments, excludedVersions, classifyErrors, csv };
+  return { PRIOR_NOTE, priorChecked, portableName, portableIssue, write, needsUpdate, needsAttachments, needsPriorAttachments, excludedVersions, classifyErrors, csv };
 });

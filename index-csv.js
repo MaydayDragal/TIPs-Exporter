@@ -8,7 +8,8 @@
   const HEADER = ['index', 'batch', 'tips', 'tipsId', 'version_indexed', 'title', 'modification_date', 'status', 'exported_on'];
   const OPTIONAL = ['document_exceptions', 'attachment_inventory', 'prior_attachments_checked'];
   // prior_attachments_checked: versions 1…N were read for attachments a later revision removed.
-  const escape = v => { let s = String(v ?? '').replace(/\r\n?|\n/g, ' '); if (/^[=+\-@\t]/.test(s)) s = "'" + s; return '"' + s.replace(/"/g, '""') + '"'; };
+  // Formula guard: a leading ' is added before =+-@<tab> and before ' itself, so parse() can always remove exactly one.
+  const escape = v => { let s = String(v ?? '').replace(/\r\n?|\n/g, ' '); if (/^['=+\-@\t]/.test(s)) s = "'" + s; return '"' + s.replace(/"/g, '""') + '"'; };
   const validVersion = v => Number.isSafeInteger(v) && v >= 1 && v <= 10000;
   const validDate = value => typeof value === 'string' && value.length <= 40 && Number.isFinite(Date.parse(value));
   function normalizeExceptions(value = []) {
@@ -99,13 +100,13 @@
     const index = [], done = {}, seen = new Set();
     for (const [n, row] of all.entries()) {
       if (row.length !== head.length) throw Error(`Progress CSV row ${n + 2} has the wrong number of columns.`);
-      const [i, b, tips, tipsId, version, title, mdate, status, date] = row.map(x => /^'[=+\-@\t]/.test(x) ? x.slice(1) : x);
+      const [i, b, tips, tipsId, version, title, mdate, status, date] = row.map(x => /^'['=+\-@\t]/.test(x) ? x.slice(1) : x);
       if (!/^\d+$/.test(i) || +i < 1 || !tips.trim() || !/^[A-Za-z0-9_-]+$/.test(tipsId) || ['__proto__', 'constructor', 'prototype'].includes(tipsId)) throw Error(`Invalid topic in progress CSV row ${n + 2}.`);
       if (!/^\d+$/.test(version) || !Number.isSafeInteger(+version) || +version < 1) throw Error(`Invalid version in progress CSV row ${n + 2}.`);
       if (!['pending', 'exported'].includes(status)) throw Error(`Invalid status in progress CSV row ${n + 2}.`);
       if (status === 'exported' && (!/^\d+$/.test(b) || !Number.isSafeInteger(+b) || +b < 1)) throw Error(`Invalid batch in progress CSV row ${n + 2}.`);
       // Preserve opaque IDs (including numbers too large to represent exactly in JavaScript).
-      const id = /^\d+$/.test(tipsId) && Number.isSafeInteger(+tipsId) ? +tipsId : tipsId;
+      const id = /^\d+$/.test(tipsId) && Number.isSafeInteger(+tipsId) && String(+tipsId) === tipsId ? +tipsId : tipsId;   // "007" stays a string
       if (seen.has(String(id))) throw Error(`Duplicate topic ID in progress CSV row ${n + 2}.`);
       const item = { tips, tipsId: id, version: +version, title, mdate };
       for (const field of OPTIONAL) {

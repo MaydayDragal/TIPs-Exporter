@@ -196,8 +196,9 @@ function makeScrubber(L) {
   }
   function matchRule(text, rules) {
     if (!text) return null;
-    for (const r of rules.strings) if (r && text.toUpperCase().includes(r.toUpperCase())) return r;
-    if (rules.strings.some(r => r.toUpperCase() === 'D7MASALL') && text.replace(/[\s\u200B-\u200D\uFEFF]/g, '').toUpperCase().includes('D7MASALL')) return 'D7MASALL';
+    // Ignore spacing for every rule: an ID drawn one glyph at a time (Td moves, TJ kerning) reads as "D 7 X Y \u2026".
+    const squash = t => String(t).replace(/[\s\u200B-\u200D\uFEFF]/g, '').toUpperCase(), flat = squash(text);
+    for (const r of rules.strings) { const k = r && squash(r); if (k && flat.includes(k)) return r; }
     if (rules.timestamp) {
       const date = '(?:\\d{1,2}[-./]\\d{1,2}[-./]\\d{4}|\\d{4}[-./]\\d{1,2}[-./]\\d{1,2})';
       const time = '\\d{1,2}:\\d{2}(?::\\d{2})?(?:\\s*[AP]M)?(?:\\s*(?:UTC|GMT|Z|[+-]\\d{2}:?\\d{2}))?';

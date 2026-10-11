@@ -51,7 +51,8 @@
         const diskText = await read(record.handle, record.filename);
         if (diskText == null) throw Error('The configured index file is missing. Reconnect the folder to create it again.');
         const disk = CSV.parse(diskText), canonicalDisk = stateText(disk), baseline = stateText(CSV.parse(record.expectedText));
-        if (diskText !== record.expectedText && canonicalDisk !== localText) {
+        // Compare content, not bytes: a file only re-saved with other line endings or quoting has not changed.
+        if (canonicalDisk !== baseline && canonicalDisk !== localText) {
           if (localText !== baseline || !allowRead) throw Object.assign(Error('The folder index changed outside this installation. Reconnect and choose which index to use in Settings.'), { code: 'conflict' });
           await deps.writeState(disk, { reset: true });
         } else if (localText !== canonicalDisk) {

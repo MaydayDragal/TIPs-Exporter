@@ -160,7 +160,8 @@
   // Page size the Reader itself uses for topic search, reported by pagesize-probe.js (runs in the page's world).
   function notePageSize(n) {
     const s = S.settings;
-    if (!Number.isInteger(n) || n < 1 || s.pageSizeSrc === 'manual' || (s.pageSize === n && s.pageSizeSrc === 'detected')) return false;
+    // The value comes from the page's own world: accept only what the manual setting allows.
+    if (!Number.isInteger(n) || n < 1 || n > 500 || s.pageSizeSrc === 'manual' || (s.pageSize === n && s.pageSizeSrc === 'detected')) return false;
     s.pageSize = n; s.pageSizeSrc = 'detected';
     return true;
   }
@@ -197,6 +198,8 @@
   const safe = s => portable(portable(s).slice(0, 90));
   const topicName = item => clip(item.title, 45) ? `${safe(item.tips)} - ${clip(item.title, 45)}` : safe(item.tips);
   const csvEsc = window.TIPSIndexCsv.escape;
+  // Marks an earlier-version attachment error as final, so a folder sync reports it without retrying the LI.
+  const PRIOR_NOTE = window.TIPSDocumentsClient?.PRIOR_NOTE || ' (earlier version; not retried)';
   const loc = o => o ? (o.en || Object.values(o)[0] || '') : '';
   const pad3 = n => String(n).padStart(3, '0');
   // Batches = the next `batchSize` pending documents in index order. Progress is tracked per document,
@@ -277,16 +280,20 @@
   async function get(url, accept, tries = 3) {
     let last;
     for (let i = 0; i < tries; i++) {
+      let wait = 1500 * (i + 1);
       try {
         const r = sessionCheck(await fetch(url, { credentials: 'include', headers: { ...H(), Accept: accept } }), accept);
-        if (r.ok || r.status < 500) return r;
+        // 408/429 are temporary like 5xx: retry, and never treat a rate-limited file as a final answer.
+        if (r.ok || (r.status < 500 && r.status !== 408 && r.status !== 429)) return r;
         last = 'HTTP ' + r.status;
+        const after = +(r.headers && r.headers.get && r.headers.get('Retry-After'));
+        if (after > 0) wait = Math.max(wait, Math.min(after, 30) * 1000);
       } catch (e) {
         if (e instanceof SessionError) throw e;
         if ((e && e.name === 'TypeError') && await probeSession()) throw new SessionError('Session expired – TIPS redirected to the login page');
         last = e.message;
       }
-      await sleep(1500 * (i + 1));
+      await sleep(wait);
     }
     throw new TransientError(last || 'request failed');
   }
@@ -565,8 +572,9 @@
         item.opts = { documentFolder: true, existingVersions: [...topic.versions, ...excluded],
           retryVersions: retryExceptions ? excluded.filter(v => v <= +item.version) : null,
           att: priorAttachments || (!retryExceptions && client.needsAttachments(topic, item)), priorOnly: priorAttachments,
-          // Earlier versions already read for removed attachments are not read again.
-          priorFrom: client.priorChecked(topic, item) + 1 };
+          // Earlier versions already read for removed attachments are not read again. The record is shared by
+          // every folder using this index, so a topic folder created now (new or another documents folder) reads them all.
+          priorFrom: topic.create ? 1 : client.priorChecked(topic, item) + 1 };
         let stop = null;
         try {
           const stats = await exportDoc(item, files, errors, label => { check(); run.label = `${topic.tips} · ${run.i}/${run.total} selected · ${label}`; render(); }, policy);
@@ -576,6 +584,7 @@
           check();
           for (const file of files) {
             check(); const path = file.name.slice(file.name.indexOf('/') + 1);
+            if (!file.data.length) { summary.skipped++; continue; }   // an empty attachment has nothing to save; the folder API rejects it
             run.label = `${topic.tips} · saving ${path}`; render();
             const saved = await client.write(documentsRequest, run.token, topic.tips, file.version || stats.version, { path, data: file.data }, () => run.cancel);
             if (saved.skip) summary.skipped++; else if (saved.kind === 'pdf') summary.pdfs++; else summary.attachments++;
@@ -791,7 +800,7 @@
         step(`attachments of v${pv}`, { g: 'priorAtt', k: pv - priorFrom + 1, n: v - priorFrom, v: pv });
         try {
           const jr = await get(`/tips/topic-service/api/v1/topics/${item.tipsId}/${pv}?${Q()}`, 'application/json');
-          if (jr.status === 404) continue;   // that version is gone from TIPS; nothing to read
+          if (jr.status === 404) { await sleep(150); continue; }   // that version is gone from TIPS; nothing to read
           if (!jr.ok) throw Object.assign(new Error('HTTP ' + jr.status), { transient: true });
           for (const a of ((await jr.json()).attachments || [])) {
             const k = key(a); if (!a.dataUrl || current.has(k)) continue;
@@ -806,16 +815,24 @@
         let fn = clip(a.filename || ('attachment_' + a.attId), 60);
         if (used.has(fn.toLowerCase())) {
           const dot = fn.lastIndexOf('.'), stem = dot > 0 ? fn.slice(0, dot) : fn, ext = dot > 0 ? fn.slice(dot) : '';
-          let n = 1; do { fn = clip(`${stem} (v${x.last}${n > 1 ? '-' + n : ''})${ext}`, 60); n++; } while (used.has(fn.toLowerCase()));
+          // Shorten only the stem, so the version tag is never clipped away (a clipped tag repeats the same name forever).
+          let n = 1; do { const tag = ` (v${x.last}${n > 1 ? '-' + n : ''})`; fn = clip(stem, Math.max(1, 60 - ext.length - tag.length)) + tag + ext; n++; } while (used.has(fn.toLowerCase()));
         }
         used.add(fn.toLowerCase());
         lines.push([`${a.type || ''} (${range} only)`, fn, loc(a.i18nDescription), a.creationDate].map(csvEsc).join(','));
         step(`earlier attachment ${k + 1}/${list.length}`, { g: 'priorAtt', dl: true, k: k + 1, n: list.length });
+        // A file only an earlier version listed that TIPS no longer serves (or that cannot be scrubbed) will not
+        // change: report it once and keep the check, instead of retrying the whole LI on every sync.
         try {
           const br = await fetchAttachment(a);
           if (await addDownload(files, errors, stats, `${dir}/${fn}`, br, policy, { attId: a.attId, version: x.last })) { nAtt++; nPriorAtt++; }
+          else if (window.TIPSPdfScrubber) errors[errors.length - 1] += PRIOR_NOTE;
           else scanOk = false;
-        } catch (e) { scanOk = false; failed(e); errors.push(`${item.tips}: attachment "${fn}" (${range}) ${e.message}`); }
+        } catch (e) {
+          const before = transient; failed(e);
+          if (transient > before) scanOk = false;
+          errors.push(`${item.tips}: attachment "${fn}" (${range}) ${e.message}${transient > before ? '' : PRIOR_NOTE}`);
+        }
       }
       if (scanOk) priorAttachmentsThrough = v - 1;
     }
@@ -954,7 +971,7 @@
     keepPending();
     setMsg(leftover.length ? `Batch ${n} reached ${capMB()} MB after ${results.length} documents – ready for review. The other ${leftover.length} stay pending for the next batch.` : `Batch ${n} ready for review.`);
     render();
-    if (S.settings.autoApprove) approve();
+    if (S.settings.autoApprove) approve().catch(e => { setMsg('Error: ' + e.message); render(); });
   }
   async function approve() {
     const p = S.pending; if (!p) return;
@@ -966,11 +983,14 @@
       saveBlob(p.blob, p.fname);
       const now = new Date().toISOString(), cur = new Map(S.index.map(x => [String(x.tipsId), x]));
       // A newer version found after this batch was built stays pending, so it is exported in a later batch.
-      let gaveUp = 0;
+      // progressed: documents that were saved or moved one try closer to giving up. A batch with none (every
+      // document failed outright, e.g. topic data 404) would be built again unchanged, so auto-continue stops.
+      let gaveUp = 0, progressed = 0;
       for (const r of p.results) {
         const x = cur.get(String(r.tipsId)), same = !x || +x.version === +r.version;
-        if (r.status === 'ok') { if (same) { S.done[r.tipsId] = { b: p.n, d: now, v: r.version }; delete S.retry[r.tipsId]; } }
+        if (r.status === 'ok') { progressed++; if (same) { S.done[r.tipsId] = { b: p.n, d: now, v: r.version }; delete S.retry[r.tipsId]; } }
         else if (isInc(r) && same) {   // some files failed temporarily: try the document again in a later batch, at most 3 times
+          progressed++;
           S.retry[r.tipsId] = (S.retry[r.tipsId] || 0) + 1;
           if (S.retry[r.tipsId] >= MAX_TRIES) { S.done[r.tipsId] = { b: p.n, d: now, v: r.version, missing: r.transient }; delete S.retry[r.tipsId]; gaveUp++; }
         }
@@ -981,8 +1001,9 @@
       railFlash = Date.now() + 6000; setTimeout(render, 6100);
       const inc = p.results.filter(isInc).length - gaveUp;
       const scrubFailed = p.results.some(r => r.pdfScrubFailed);
-      setMsg(`Downloaded ${p.fname}.` + (scrubFailed ? ' Some PDFs could not be scrubbed. Their documents stay pending; auto-continue stopped. See the batch errors file.' : '') + (inc ? ` ${inc} incomplete document(s) stay pending and are tried again in the next batch.` : '') + (gaveUp ? ` ${gaveUp} document(s) still had missing files after ${MAX_TRIES} tries and are marked exported – see the batch errors file.` : ''));
-      if (S.settings.autoContinue && nextBatch() && !scrubFailed && !folderProblem()) setTimeout(autoNext, Math.max(800, randDelay()));
+      setMsg(`Downloaded ${p.fname}.` + (scrubFailed ? ' Some PDFs could not be scrubbed. Their documents stay pending; auto-continue stopped. See the batch errors file.' : '') + (inc ? ` ${inc} incomplete document(s) stay pending and are tried again in the next batch.` : '') + (gaveUp ? ` ${gaveUp} document(s) still had missing files after ${MAX_TRIES} tries and are marked exported – see the batch errors file.` : '')
+        + (!progressed && !scrubFailed && S.settings.autoContinue && nextBatch() ? ' No document in this batch could be saved, so auto-continue stopped. See the batch errors file.' : ''));
+      if (S.settings.autoContinue && progressed && nextBatch() && !scrubFailed && !folderProblem()) setTimeout(autoNext, Math.max(800, randDelay()));
     } finally {
       S.approving = false;
       render();

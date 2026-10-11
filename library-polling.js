@@ -33,7 +33,7 @@
         const { documentsFolder: s, lastCheck } = await chrome.storage.local.get(['documentsFolder', 'lastCheck']);
         if (!enabled(s) || now() - Date.parse(lastCheck?.at) < minutes(s.pollMinutes) * 60000 - 1000) return;
         const connection = await db.get('documentsConnection');
-        if (!connection || await connection.handle.queryPermission({ mode: 'readwrite' }) !== 'granted') return;
+        if (!connection || await connection.handle.queryPermission({ mode: 'readwrite' }) !== 'granted') return 'no-access';   // the startup caller then runs its own sync, which reports the missing permission
         const tabs = (await chrome.tabs.query({ url: READER + '*' })).filter(t => Number.isInteger(t.id) && t.url?.startsWith(READER) && !t.discarded);
         const states = await Promise.all(tabs.map(async tab => ({ tab, state: await message(tab.id, { type: 'library-poll-status' }) })));
         // A manual export, scan or another automatic update gets the whole interval to finish.
@@ -58,7 +58,7 @@
       chrome.runtime.onMessage.addListener((m, sender, reply) => {
         if (m?.type !== 'library-poll-startup') return;
         if (sender?.id !== chrome.runtime.id || !sender.url?.startsWith(READER) || !Number.isInteger(sender.tab?.id)) { reply({ handled: true, error: 'Request not allowed.' }); return; }
-        run().then(() => reply({ handled: true })); return true;
+        run().then(r => reply({ handled: r !== 'no-access' })); return true;
       });
       reconcile().catch(() => {});
     }

@@ -2,6 +2,24 @@
 
 TIPS Exporter keeps a local library of XENTRY TIPS LIs and attachments up to date. It runs inside your logged-in TIPS tab, checks recent index changes, and downloads only changed or missing files into their existing folders. New PDFs undergo required cleanup of `D7MASALL`, download/print stamps and metadata before saving. Older versions and attachments are preserved.
 
+**Version 1.20.4 (QA fixes):**
+- Saving an attachment from an earlier version could freeze the TIPS tab. This happened when its long filename clashed with a current attachment. The version tag is now kept and only the name before it is shortened.
+- With auto-approve and auto-continue on, an LI that always failed (for example, topic data returning HTTP 404) produced new batch ZIPs without end. Auto-continue now stops when a batch saves nothing.
+- HTTP 429 and 408 responses are retried, honouring `Retry-After`, instead of being treated as final. Before, a rate-limited PDF could mark its LI exported without the file.
+- Earlier-version attachments are now read from v1 when a document folder is newly created. Before, the shared index log skipped them. An earlier-version attachment that TIPS no longer serves, or that cannot be scrubbed, is reported once. Library sync no longer retries the whole LI for it on every run.
+- PDF cleanup now ignores spacing and kerning for every rule, not only `D7MASALL`. This covers user IDs and custom strings drawn one character at a time.
+- Re-saving the index CSV with different line endings or quoting is no longer reported as "changed outside this installation".
+- When automatic sync starts without folder access, the missing permission is now reported. Before, sync silently did nothing.
+- Other fixes:
+  - Empty attachments are skipped instead of failing the LI.
+  - Titles starting with an apostrophe survive a CSV save and load.
+  - Topic IDs with leading zeros are kept as written.
+  - Folder names ending in `.{a}.{b}` are made fully portable.
+  - Settings no longer overwrites unsaved edits while a sync updates its status.
+  - The page-size value reported by the page is capped at 500.
+
+**Compatibility:** versions 1.20.1 and earlier reject an index CSV that contains the `prior_attachments_checked` column, which 1.20.2 added. Use 1.20.2 or later on every PC that shares an index folder.
+
 **Version 1.20.3:** **Folder repair options** is laid out as a panel. Each action is a full-width button with its description underneath, the actions are separated by dividers, and expandable sections show an open/closed arrow.
 
 **Version 1.20.2:** the record of which earlier versions were checked for removed attachments is now saved in the portable index CSV, in the new optional `prior_attachments_checked` column. Before this, it lived only in the extension's browser storage. Loading an update from a different folder or choosing the documents folder again wiped that storage, and **Get attachments from earlier versions** started over. Checks made by earlier 1.20.x versions that are still in this browser are kept, and each LI is copied into the CSV the next time it is processed.
@@ -16,7 +34,7 @@ TIPS Exporter keeps a local library of XENTRY TIPS LIs and attachments up to dat
 
 1. Download this repository with **Code → Download ZIP** and extract it to a permanent folder. Open the extracted repository folder that contains `manifest.json`.
 2. In Chrome, open `chrome://extensions` and switch on **Developer mode** (top right).
-3. Click **Load unpacked** and select the extracted folder that directly contains `manifest.json`. The extension card must show **1.20.3**.
+3. Click **Load unpacked** and select the extracted folder that directly contains `manifest.json`. The extension card must show **1.20.4**.
 4. Optional: pin the extension to the toolbar (puzzle icon, then the pin).
 
 Needs Chrome 111 or newer.
