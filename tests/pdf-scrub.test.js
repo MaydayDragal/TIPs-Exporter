@@ -89,7 +89,7 @@ async function env(pdf, { scrub, missingEngine = false, idb = new IDBFactory(), 
       if (expirePrior && !expired && /\/101\/1\?/.test(u)) { expired = true; return { ok: false, status: 401 }; }
       return bytes(pdf);
     }
-    if (/\/topics\/101\/2\?/.test(u)) return json({ version: 2, attachments: [
+    if (/\/topics\/101\/[12]\?/.test(u)) return json({ version: 2, attachments: [
       { attId: 1, filename: 'document.PDF', type: 'PDF', dataUrl: 'https://example.test/?readKey=pdf' },
       { attId: 2, filename: 'no-extension', type: 'file', dataUrl: 'https://example.test/?readKey=magic' },
       { attId: 3, filename: 'note.txt', type: 'file', dataUrl: 'https://example.test/?readKey=text' }

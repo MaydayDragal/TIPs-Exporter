@@ -28,6 +28,21 @@
     }
     check(); return send('finish', { token, upload: started.upload });
   }
+  // Chrome's File System Access API (FileSystemDirectoryHandle.getFileHandle/getDirectoryHandle) rejects more than
+  // Windows does: '~' anywhere, control/format/surrogate/non-characters (zero-width spaces, soft hyphens, direction
+  // marks, BOM), whitespace, '.' or '~' at either end, reserved device names, desktop.ini/thumbs.db and shell-integrated
+  // extensions (.lnk, .local, .url, .scf, .{CLSID}). It throws "Name is not allowed". Map every name to one it accepts.
+  const BAD_ANYWHERE = /[\\/:*?"<>|~\p{Cc}]/gu, INVISIBLE = /[\p{Cf}\p{Cs}\p{Noncharacter_Code_Point}]/gu;
+  const RESERVED = /^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9]|CLOCK\$)(?:\.|$)|^(?:desktop\.ini|thumbs\.db)$/i;
+  const SHELL_EXT = /\.(lnk|local|url|scf|\{[^.]*\})$/i;
+  function portableName(value, fallback = '_') {
+    let s = String(value ?? '').replace(INVISIBLE, '').replace(BAD_ANYWHERE, '_').replace(/\s+/gu, ' ');
+    s = s.replace(/^[\s.]+|[\s.]+$/gu, '');
+    if (SHELL_EXT.test(s)) s = s.replace(SHELL_EXT, '_$1');
+    if (RESERVED.test(s)) s = '_' + s;
+    return s || fallback;
+  }
+  function portableIssue(value) { const s = String(value ?? ''); return !!s && portableName(s, '') !== s; }
   function needsAttachments(topic, index) {
     if (!index) return false;
     const last = topic.last, known = last || topic.baseline;
@@ -40,6 +55,14 @@
     const since = Number.isFinite(time(known?.mdate)) ? time(known.mdate) : time(baselineDate);
     if (known && +known.version === +index.version && time(index.mdate) > since) return true;
     return !topic.versions.includes(+index.version) && !excludedVersions(index).includes(+index.version);
+  }
+  // Attachments removed in a later revision are only listed by older versions' topic data.
+  // A topic needs that one-time read until versions 1…current-1 have been checked.
+  // The portable index log is the durable record; the folder's local progress is a fallback (pre-1.20.2 runs).
+  function priorChecked(topic, index) { return Math.max(+index?.priorAttachmentsChecked || 0, +topic?.last?.priorAttachmentsThrough || 0); }
+  function needsPriorAttachments(topic, index) {
+    if (!index || +index.version < 2) return false;
+    return priorChecked(topic, index) < +index.version - 1;
   }
   function needsUpdate(topic, index) {
     if (!index) return false;
@@ -56,5 +79,5 @@
     for (const issue of inventory.issues) rows.push(['# Scan issue',issue]);
     return rows.map(r => r.map(cell).join(',')).join('\r\n') + '\r\n';
   }
-  return { write, needsUpdate, needsAttachments, excludedVersions, classifyErrors, csv };
+  return { priorChecked, portableName, portableIssue, write, needsUpdate, needsAttachments, needsPriorAttachments, excludedVersions, classifyErrors, csv };
 });

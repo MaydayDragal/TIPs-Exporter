@@ -2,13 +2,21 @@
 
 TIPS Exporter keeps a local library of XENTRY TIPS LIs and attachments up to date. It runs inside your logged-in TIPS tab, checks recent index changes, and downloads only changed or missing files into their existing folders. New PDFs undergo required cleanup of `D7MASALL`, download/print stamps and metadata before saving. Older versions and attachments are preserved.
 
+**Version 1.20.3:** **Folder repair options** is laid out as a panel. Each action is a full-width button with its description underneath, the actions are separated by dividers, and expandable sections show an open/closed arrow.
+
+**Version 1.20.2:** the record of which earlier versions were checked for removed attachments is now saved in the portable index CSV, in the new optional `prior_attachments_checked` column. Before this, it lived only in the extension's browser storage. Loading an update from a different folder or choosing the documents folder again wiped that storage, and **Get attachments from earlier versions** started over. Checks made by earlier 1.20.x versions that are still in this browser are kept, and each LI is copied into the CSV the next time it is processed.
+
+**Version 1.20.1:** fixes `Failed to execute 'getFileHandle' on 'FileSystemDirectoryHandle': Name is not allowed.` Chrome's folder API refuses some names that Windows accepts: `~` anywhere, invisible characters such as zero-width spaces, soft hyphens and direction marks, leading dots, `.lnk`/`.url`/`.local`/`.scf` endings, and reserved names such as `CON` or `desktop.ini`. New files and folders now get a portable name: `Debris~1.png` is saved as `Debris_1.png`, invisible characters are dropped, and `link.url` becomes `link_url`. An identical copy you already saved under the old `~` name is recognised and not saved again. LIs that failed with this error are retried on the next sync or catch-up run.
+
+**Version 1.20.0:** attachments that a later revision removed are now saved too. Photos and files that only older versions of an LI listed (for example thermostat debris photos dropped in v25 of a 33-version LI) are found by reading each earlier version's topic data once, and are saved in **Attachments and Links** beside the current ones. This applies to every ZIP download and to Library sync. For documents already in your library, run **Library → Folder repair options → Get attachments from earlier versions** once. See [Attachments from earlier versions](#attachments-from-earlier-versions).
+
 **Version 1.19.0:** automatic Library sync now repeats in the background every **10 minutes** by default. Change **Check every (minutes)** in **⚙ → Automatic library sync** or **Folder settings → Documents folder**. One browser-wide schedule coordinates open TIPS tabs and skips busy runs. New PDFs still receive required cleanup, older files are preserved, and manual ZIP tools remain under Advanced.
 
 ## Install
 
 1. Download this repository with **Code → Download ZIP** and extract it to a permanent folder. Open the extracted repository folder that contains `manifest.json`.
 2. In Chrome, open `chrome://extensions` and switch on **Developer mode** (top right).
-3. Click **Load unpacked** and select the extracted folder that directly contains `manifest.json`. The extension card must show **1.19.0**.
+3. Click **Load unpacked** and select the extracted folder that directly contains `manifest.json`. The extension card must show **1.20.3**.
 4. Optional: pin the extension to the toolbar (puzzle icon, then the pin).
 
 Needs Chrome 111 or newer.
@@ -63,6 +71,17 @@ The schedule uses the [Chrome alarms API](https://developer.chrome.com/docs/exte
 **Scrubbing and interruptions:** new PDFs and PDF attachments receive required cleanup plus your additional scrub rules before saving. Existing PDFs are not rewritten when rules change. Stop waits for the current network request, cancels remaining work, and keeps completed files. A lost session, revoked access, or worker restart produces a retryable error. Restore your session or choose **Allow documents access**, then update again. The extension cleans its own uncommitted empty placeholders and skips completed files. Avoid editing the archive from another application or extension installation during an update; tab coordination only covers this installation.
 
 Folder handles persist across updates to the same installation. A new installation must select the index and documents folders again; portable exceptions and attachment expectations are restored from the index, and a local scan inventories new files. Scans support 8 nested container levels, 8 nested attachment levels, and 100,000 entries; choose a more specific archive folder if a limit is reached. Each downloaded file is limited to 512 MiB. Folder updates save PDFs and attachment files; optional metadata and links lists remain ZIP export features. If the index disk is temporarily unavailable, metadata stays in Chrome awaiting synchronization. Conflicting or stale index saves never discard unacknowledged exception records.
+
+## Attachments from earlier versions
+
+TIPS lists only the attachments of the version you request. When a revision drops an attachment, the newest topic data no longer mentions it, but the older versions still do and their download links keep working. **⚙ → Attachments → Attachments removed in earlier versions** (on by default) makes every download path read each earlier version's topic data and save those files.
+
+- **One extra request per earlier version.** An attachment that several versions list (same attachment ID) is downloaded once. A version that TIPS no longer has (HTTP 404) is skipped and is not an error.
+- **Names.** Earlier files go in the same **Attachments and Links** folder and keep their own names. If a name is already taken, the file gets the last version that listed it: `photo.png` (current) and `photo (v24).png` (earlier). Duplicate-name handling in the documents folder treats `photo (v24).png` and `photo.png` as one family, so a copy with identical contents is never saved twice.
+- **ZIP downloads.** With **Include attachments** ticked in the version picker, earlier attachments are included whichever versions you tick. The picker now also offers the checkbox when the current version has no attachments of its own. The optional links CSV labels earlier files with the versions that had them, e.g. `C (v1-v24 only)`.
+- **Library sync.** The index CSV records which earlier versions have already been read for each LI (`prior_attachments_checked`), so the record survives a reinstall or choosing the folder again. When a new version arrives, sync reads only the versions it hasn't checked yet, usually just the previous one. If an earlier-version read or download fails, that LI is checked again next time.
+- **Existing library.** Routine syncs don't sweep LIs that haven't changed. Run **Library → Folder repair options → Get attachments from earlier versions** once. It goes through LIs that have more than one version and haven't been checked, reads their earlier versions, saves only the missing attachments, and requests no PDFs. It paces between documents like other updates. Stop keeps finished LIs, and running it again skips the LIs it already checked.
+- Turn the setting off to go back to current-version attachments only. The catch-up button is then disabled.
 
 ## Opening and closing
 

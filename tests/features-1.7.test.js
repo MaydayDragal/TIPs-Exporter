@@ -36,7 +36,7 @@ async function fakeFetch(url, init = {}) {
     const t = byId[m[1]];
     const attachments = t.tipsId === 102 ? [{ attId: 1, filename: 'Wiring diagram for power steering control unit N68 with all connector pin assignments and ground points revision C.pdf', dataUrl: 'https://x/y?readKey=rk1', type: 'PDF' }] : [];
     const children = t.tipsId === 101 ? [{ version: 5, flowId: 'REA', creationDate: '2026-09-20T09:00:00Z', i18nChangeReason: {} }, { version: 5, flowId: 'PUB', creationDate: '2026-09-21T11:37:00Z', i18nChangeReason: {} }, { version: 3, flowId: 'DRA', creationDate: '2026-02-20T08:00:00Z', i18nChangeReason: { en: 'Extended to model series 214' } }, { version: 3, flowId: 'PUB', creationDate: '2026-03-02T08:00:00Z' }, { version: 2, flowId: 'PUB', creationDate: '02.11.2025 some format' }] : [];
-    log.push({ kind: 'data', id: m[1] });
+    log.push({ kind: 'data', id: m[1], v: +m[2] });
     return { ok: true, status: 200, json: async () => ({ version: +m[2], i18nChangeReason: t.tipsId === 101 ? { en: 'Added road test\nstep' } : {}, attachments, references: [], history: { children } }) };
   }
   if (u.includes('/download/url')) return { ok: true, status: 200, json: async () => ({ url: 's3.example/f' }) };
@@ -173,7 +173,7 @@ const IDX = T.map(t => ({ tips: t.tips, tipsId: t.tipsId, version: t.version, ti
     const ticked = [...pk().querySelectorAll('input[data-v]:checked')].map(x => +x.dataset.v);
     ok(vs.join() === '5,4,3,2,1' && ticked.join() === '5', 'download icon opens a list of all 5 versions, newest first, only the current one ticked');
     ok(/v5\s*current/.test(pt()) && pt().includes(new Date('2026-09-21T11:37:00Z').toLocaleDateString()) && /Added road test step/.test(pt()) && /Download 1 version/.test(pt()), 'each version shows its date and change reason; button says Download 1 version');
-    ok(/no attachments or links/.test(pt()) && !P('p_att') && icon(0).getAttribute('aria-expanded') === 'true', 'a topic without attachments says so');
+    ok(/Include attachments \(none in the current version; plus files removed in earlier versions\)/.test(pt()) && P('p_att').checked && icon(0).getAttribute('aria-expanded') === 'true', 'a topic without current attachments still offers the ones removed in earlier versions');
     ok(/Extended to model series 214/.test(pt()) && /02\.11\.202/.test(pt()), 'change reason found on the draft entry; an unknown date format is shown as given');
     e.w.document.body.dispatchEvent(new e.w.Event('pointerdown', { bubbles: true, composed: true })); await tick(20);
     ok(!pk() && e.saved.length === 0, 'clicking elsewhere on the page closes the picker');
@@ -189,7 +189,7 @@ const IDX = T.map(t => ({ tips: t.tips, tipsId: t.tipsId, version: t.version, ti
     ok(!pk(), 'clicking the icon again closes it');
     // pick v5 + v3 only
     icon(0).click(); await waitFor(() => P('p_go') && !P('p_go').disabled);
-    const dataReads = log.filter(x => x.kind === 'data').length;
+    const dataReads = log.filter(x => x.kind === 'data' && x.id === '101' && x.v === 5).length;
     P('p_all').click(); await tick(10);
     ok(/Download all 5 versions/.test(pt()) && pk().querySelectorAll('input[data-v]:checked').length === 5, 'All ticks every version');
     P('p_cur').click(); await tick(10);
@@ -201,11 +201,11 @@ const IDX = T.map(t => ({ tips: t.tips, tipsId: t.tipsId, version: t.version, ti
     await waitFor(() => icon(0).dataset.state === 'done');
     const z1 = await unzip(e.w, e.saved.at(-1).blob), pdf1 = z1.filter(n => n.endsWith('.pdf')).map(n => n.split('/').pop()).sort();
     ok(e.saved.at(-1).name === 'LI42.10-P-078779 - Brake vibration from 60MPH – Diagnostic Guide_v3_v5.zip' && pdf1.join() === 'LI42.10-P-078779_v3.pdf,LI42.10-P-078779_v5.pdf', 'saves only the picked versions: ' + e.saved.at(-1).name + ' · ' + pdf1.join(' '));
-    ok(log.slice(before).filter(x => x.kind === 'pdf').map(x => x.v).sort().join() === '3,5' && log.filter(x => x.kind === 'data').length === dataReads, 'only those 2 PDFs are requested; the topic data is not read twice');
+    ok(log.slice(before).filter(x => x.kind === 'pdf').map(x => x.v).sort().join() === '3,5' && log.filter(x => x.kind === 'data' && x.id === '101' && x.v === 5).length === dataReads && log.slice(before).filter(x => x.kind === 'data').map(x => x.v).join() === '1,2,3,4', 'only those 2 PDFs are requested; the current topic data is not read twice and v1–v4 are read once for removed attachments');
     ok(!pk() && rowClicked === 0 && e.w.document.activeElement === icon(0), 'picker closes, focus is back on the row icon; the row was never opened');
     // attachments off
     icon(1).click(); await waitFor(() => P('p_att'));
-    ok(/Include attachments \(1 file\)/.test(pt()) && P('p_att').checked, 'topic with an attachment: Include attachments (1 file), ticked');
+    ok(/Include attachments \(current: 1 file; plus files removed in earlier versions\)/.test(pt()) && P('p_att').checked, 'topic with an attachment: Include attachments (current: 1 file; plus earlier ones), ticked');
     P('p_att').click(); P('p_go').click();
     await waitFor(() => icon(1).dataset.state === 'done');
     const z2 = await unzip(e.w, e.saved.at(-1).blob);
@@ -220,6 +220,9 @@ const IDX = T.map(t => ({ tips: t.tips, tipsId: t.tipsId, version: t.version, ti
     await waitFor(() => e.saved.length === 4);
     ok(e.saved.at(-1).name === 'LI42.10-P-078779 - Brake vibration from 60MPH – Diagnostic Guide.zip' && (await unzip(e.w, e.saved.at(-1).blob)).filter(n => n.endsWith('.pdf')).length === 5, 'All + attachments saves <LI> - <Title>.zip with all 5 PDFs');
     ok(!e.w.document.querySelector('.tipsx-row input, .tipsx-sel') && !e.root().querySelector('.selbar'), 'no tick boxes or selection bar');
+    icon(3).click(); await waitFor(() => P('p_go') && !P('p_go').disabled);
+    ok(/no attachments or links/.test(pt()) && !P('p_att'), 'a single-version topic without attachments says so');
+    P('p_cancel').click(); await tick(20);
     // lazy list: new cards get the icon too
     e.w.document.querySelector('.xy-c-card-list-wrapper > div').insertAdjacentHTML('beforeend', `<div><xy-c-card-table-card id="card-105_1_P"><button><xy-c-card-column><p>LI82.60-P-080383</p></xy-c-card-column><xy-c-card-column><p>Radio cover art</p></xy-c-card-column></button></xy-c-card-table-card></div>`);
     await tick(100);

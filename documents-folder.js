@@ -18,7 +18,7 @@
     return s;
   }
   function topicFolder(x) {
-    const title = String(x.title || '').replace(/[\\/:*?"<>|\x00-\x1f]/g, '_').replace(/\s+/g, ' ').trim().slice(0, 45).replace(/[. ]+$/, '');
+    const title = Client.portableName(Client.portableName(x.title, '').slice(0, 45), '');
     return `${x.tips.toUpperCase()}${title ? ' - ' + title : ''} (Requested)`;
   }
   const digest = async bytes => Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)), b => b.toString(16).padStart(2, '0')).join('');
@@ -264,19 +264,23 @@
         const parts = String(file.path || '').split('/'), pm = parts.length === 1 && PDF.exec(parts[0]);
         const isPdf = !!pm && pm[1].toUpperCase() === topic.tips;
         if (!isPdf && (parts.length !== 2 || parts[0] !== 'Attachments and Links')) throw Error('File path is not allowed in this topic.');
-        let name = leaf(parts.at(-1)), d = await subdir(r.handle, topic.path, topic.create), relative = '';
+        // New files only: existing folders keep whatever names they already have.
+        let name = leaf(isPdf ? parts.at(-1) : Client.portableName(parts.at(-1), 'attachment')), d = await subdir(r.handle, topic.path, topic.create), relative = '';
         if (!isPdf) { d = await entry(d, r.attachmentFolder, 'directory', true); relative = r.attachmentFolder + '/'; }
         if (isPdf) {
           const existing = await entry(d, name, 'file');
           if (existing) { if (!await validPdf(await existing.getFile())) throw Error(`${name}: existing PDF is empty or invalid; it was preserved. Move it aside to download a replacement.`); return { skip: true, path: existing.name, kind: 'pdf' }; }
         } else {
           const dot = name.lastIndexOf('.'), stem = dot > 0 ? name.slice(0, dot) : name, ext = dot > 0 ? name.slice(dot) : '';
-          const family = new RegExp('^' + esc(stem) + '(?: \\(v[0-9]+(?:-[0-9]+)?\\))?' + esc(ext) + '$', 'i');
-          for await (const f of d.values()) if (f.kind === 'file' && family.test(f.name)) {
+          // "photo (v5).jpg" belongs to the same family as "photo.jpg", whichever name arrives.
+          const familyStem = stem.replace(/ \(v[0-9]+(?:-[0-9]+)?\)$/i, '') || stem;
+          const family = new RegExp('^' + esc(familyStem) + '(?: \\(v[0-9]+(?:-[0-9]+)?\\))?' + esc(ext) + '$', 'i');
+          // Older ZIP-extracted copies may carry characters Chrome would not create (e.g. '~'); compare their portable form.
+          for await (const f of d.values()) if (f.kind === 'file' && (family.test(f.name) || family.test(Client.portableName(f.name)))) {
             const old = await f.getFile();
             if (old.size === file.size && await digest(await old.arrayBuffer()) === file.sha256) { await remember(run, topic.tips, { name: f.name, size: file.size, sha256: file.sha256 }); return { skip: true, path: relative + f.name, kind: 'attachment' }; }
           }
-          if (await entry(d, name, 'file')) { let n = 1; do { name = leaf(`${stem} (v${file.version}${n > 1 ? '-' + n : ''})${ext}`); n++; } while (await entry(d, name, 'file')); }
+          if (await entry(d, name, 'file')) { let n = 1; do { name = leaf(Client.portableName(`${familyStem} (v${file.version}${n > 1 ? '-' + n : ''})${ext}`, 'attachment')); n++; } while (await entry(d, name, 'file')); }
         }
         const handle = await entry(d, name, 'file', true), before = await handle.getFile();
         if (before.size) throw Error(`${name} appeared during the update; it was preserved. Retry after other file operations finish.`);
@@ -315,8 +319,11 @@
         const old = r.progress[result.tips] || {}, files = new Map((old.files || []).map(x => [x.name.toLowerCase(), x]));
         for (const f of run.fileRecords[result.tips] || []) files.set(f.name.toLowerCase(), f);
         const previous = topic.last || topic.baseline || { version: +result.version, mdate: String(result.mdate || '') };
+        const through = result.priorAttachmentsThrough ?? old.priorAttachmentsThrough;
+        if (through != null && (!Number.isSafeInteger(+through) || +through < 0 || +through > 10000)) throw Error('Invalid earlier-attachment version.');
         r.progress[result.tips] = { ...(result.retryOnly ? previous : { version: +result.version, mdate: String(result.mdate || ''), policy: String(result.policy || '') }),
-          ok: !!result.ok && (!result.retryOnly || previous.ok !== false), unavailable: result.unavailable || [], files: [...files.values()], at: now() };
+          ok: !!result.ok && (!result.retryOnly || previous.ok !== false), unavailable: result.unavailable || [], files: [...files.values()], at: now(),
+          ...(through != null ? { priorAttachmentsThrough: Math.max(+through, +old.priorAttachmentsThrough || 0) } : {}) };
         for (const e of CSV.normalizeExceptions(result.exceptions)) exceptionEvent(r, topic, 'exclude', e.version, e);
         for (const version of result.resolvedVersions || []) {
           if (!Number.isSafeInteger(version) || version < 1 || version > 10000) throw Error('Invalid resolved exception version.');

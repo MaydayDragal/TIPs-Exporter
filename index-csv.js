@@ -6,7 +6,8 @@
 })(globalThis, () => {
   'use strict';
   const HEADER = ['index', 'batch', 'tips', 'tipsId', 'version_indexed', 'title', 'modification_date', 'status', 'exported_on'];
-  const OPTIONAL = ['document_exceptions', 'attachment_inventory'];
+  const OPTIONAL = ['document_exceptions', 'attachment_inventory', 'prior_attachments_checked'];
+  // prior_attachments_checked: versions 1…N were read for attachments a later revision removed.
   const escape = v => { let s = String(v ?? '').replace(/\r\n?|\n/g, ' '); if (/^[=+\-@\t]/.test(s)) s = "'" + s; return '"' + s.replace(/"/g, '""') + '"'; };
   const validVersion = v => Number.isSafeInteger(v) && v >= 1 && v <= 10000;
   const validDate = value => typeof value === 'string' && value.length <= 40 && Number.isFinite(Date.parse(value));
@@ -63,6 +64,16 @@
     }
     return { index: next, changed };
   }
+  const validChecked = v => Number.isSafeInteger(v) && v >= 0 && v <= 10000;
+  function applyPriorChecks(index, updates = []) {
+    const next = index.map(x => ({ ...x })), byKey = new Map(next.map(x => [String(x.tips).toUpperCase() + ':' + String(x.tipsId), x])); let changed = false;
+    for (const u of updates) {
+      const row = byKey.get(String(u.tips).toUpperCase() + ':' + String(u.tipsId)); if (!row) continue;
+      if (!validChecked(u.through)) throw Error('Invalid earlier-attachment check.');
+      if (u.through > (row.priorAttachmentsChecked || 0)) { row.priorAttachmentsChecked = u.through; changed = true; }
+    }
+    return { index: next, changed };
+  }
   function rows(text) {
     const out = []; let row = [], field = '', quoted = false, closed = false;
     text = String(text).replace(/^\uFEFF/, '');
@@ -102,6 +113,7 @@
         if (!text) continue;
         let value; try { value = JSON.parse(text); } catch (_) { throw Error(`Invalid ${field} JSON in progress CSV row ${n + 2}.`); }
         if (field === 'document_exceptions') { const list = normalizeExceptions(value); if (list.length) item.exceptions = list; }
+        else if (field === 'prior_attachments_checked') { if (!validChecked(value)) throw Error(`Invalid ${field} in progress CSV row ${n + 2}.`); if (value) item.priorAttachmentsChecked = value; }
         else item.attachmentInventory = normalizeAttachmentInventory(value);
       }
       seen.add(String(id)); index.push(item);
@@ -110,14 +122,16 @@
     return { index, done };
   }
   function stringify(index, done = {}) {
-    const fields = OPTIONAL.filter(field => index.some(x => field === 'document_exceptions' ? x.exceptions?.length : x.attachmentInventory));
+    const fields = OPTIONAL.filter(field => index.some(x => field === 'document_exceptions' ? x.exceptions?.length : field === 'prior_attachments_checked' ? x.priorAttachmentsChecked : x.attachmentInventory));
     const out = [[...HEADER, ...fields].join(',')];
     index.forEach((x, i) => {
       const d = done[x.tipsId], s = d && (d.v == null || +d.v === +x.version) ? d : null;
-      const extra = fields.map(field => field === 'document_exceptions' ? x.exceptions?.length ? JSON.stringify(normalizeExceptions(x.exceptions)) : '' : x.attachmentInventory ? JSON.stringify(normalizeAttachmentInventory(x.attachmentInventory)) : '');
+      const extra = fields.map(field => field === 'document_exceptions' ? x.exceptions?.length ? JSON.stringify(normalizeExceptions(x.exceptions)) : ''
+        : field === 'prior_attachments_checked' ? validChecked(x.priorAttachmentsChecked) && x.priorAttachmentsChecked ? String(x.priorAttachmentsChecked) : ''
+        : x.attachmentInventory ? JSON.stringify(normalizeAttachmentInventory(x.attachmentInventory)) : '');
       out.push([i + 1, s ? s.b : '', x.tips, x.tipsId, x.version, x.title, x.mdate, s ? 'exported' : 'pending', s ? s.d : '', ...extra].map(escape).join(','));
     });
     return out.join('\r\n');
   }
-  return { parse, stringify, escape, normalizeExceptions, applyExceptionEvents, normalizeAttachmentInventory, applyAttachmentInventories };
+  return { parse, stringify, escape, normalizeExceptions, applyExceptionEvents, normalizeAttachmentInventory, applyAttachmentInventories, applyPriorChecks };
 });

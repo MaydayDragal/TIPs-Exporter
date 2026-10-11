@@ -16,7 +16,7 @@ async function fakeFetch(url, init = {}) {
   if (u.includes('/currentuser')) return { ok: true, status: 200, json: async () => ({ userId: 'u1', currentOutlet: 'o1' }) };
   if (u.includes('/file/topics/')) return { ok: true, status: 200, arrayBuffer: async () => new ArrayBuffer(64 * 1024) };
   const m = u.match(/\/topics\/(\d+)\/(\d+)\?/);
-  if (m) { log.push({ t, kind: 'doc', id: m[1] }); const x = T.find(y => String(y.tipsId) === m[1]); return { ok: true, status: 200, json: async () => ({ version: x.version, attachments: [], references: [], history: { children: [] } }) }; }
+  if (m) { const x = T.find(y => String(y.tipsId) === m[1]); log.push({ t, kind: +m[2] < x.version ? 'prior-metadata' : 'doc', id: m[1] }); return { ok: true, status: 200, json: async () => ({ version: x.version, attachments: [], references: [], history: { children: [] } }) }; }
   return { ok: false, status: 404 };
 }
 const dialog = (li) => `<neo-topic-detail><header><h2>Topic</h2><div class="xy-d-flex"><xy-c-spinner><div><button class="xy-i-print" style="width:48px;height:48px">P</button></div></xy-c-spinner><div class="xy-border-right"></div></div></header>

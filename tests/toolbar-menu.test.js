@@ -72,7 +72,7 @@ const ok = (c, m) => { console.log((c ? 'PASS ' : 'FAIL ') + m); if (!c) process
   await waitFor(() => pk() && pk().querySelector('#p_go') && !pk().querySelector('#p_go').disabled);
   const ptxt = pk().textContent.replace(/\s+/g, ' ');
   ok([...pk().querySelectorAll('input[data-v]')].map(x => x.dataset.v + (x.checked ? '*' : '')).join() === '6*,5,4,3,2,1', 'toolbar button opens the picker: v6 … v1, only v6 ticked');
-  ok(/Worksheet update\. Language updates\./.test(ptxt) && /Include attachments \(1 file\)/.test(ptxt) && b[0].getAttribute('aria-expanded') === 'true' && e.saved.length === 0, 'current version shows its change reason (from the topic data); nothing saved yet');
+  ok(/Worksheet update\. Language updates\./.test(ptxt) && /Include attachments \(current: 1 file; plus files removed in earlier versions\)/.test(ptxt) && b[0].getAttribute('aria-expanded') === 'true' && e.saved.length === 0, 'current version shows its change reason (from the topic data); nothing saved yet');
   pk().querySelector('#p_all').click(); pk().querySelector('#p_go').click();
   await waitFor(() => b[0].dataset.state === 'busy');
   ok(true, 'button shows busy spinner');

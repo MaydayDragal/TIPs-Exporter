@@ -34,7 +34,7 @@
     resume: null,       // a download interrupted by a lost session: {title, kind, remaining, carry, finish}
     latest: {},         // newest versions seen by "Check for updates": tips -> version
     settings: { outlet: '', user: '', ver: '', batchSize: 25, delayMs: 2000, delayMaxMs: 5000, pageSize: 50, pageSizeSrc: 'default',
-      autoApprove: false, autoContinue: true, autoCheck: true, libraryIncludeMissing: true, outputLayout: OUTPUT_LAYOUT,
+      autoApprove: false, autoContinue: true, autoCheck: true, libraryIncludeMissing: true, priorAttachments: true, outputLayout: OUTPUT_LAYOUT,
       pdfScrub: { enabled: true, user: true, timestamp: true, strings: 'D7MASALL' },
       files: { docJson: false, attCsv: false, histCsv: false, histJson: false, manifest: false } },
     run: null,          // {n, i, total, label, paused, cancel}
@@ -189,9 +189,12 @@
   const crcT = (() => { const t = new Uint32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; } return t; })();
   const crc32 = u8 => { let c = 0xFFFFFFFF; for (let i = 0; i < u8.length; i++) c = crcT[(c ^ u8[i]) & 0xFF] ^ (c >>> 8); return (c ^ 0xFFFFFFFF) >>> 0; };
   // keep folder/file names short enough that extracted paths stay under Windows' 260-character limit
-  const clip = (s, n) => { s = String(s || '').replace(/[\\/:*?"<>|\x00-\x1F]/g, '_').replace(/\s+/g, ' ').trim().replace(/[. ]+$/, ''); if (s.length <= n) return s; const m = s.match(/^(.*?)(\.[A-Za-z0-9]{1,5})$/);
-    return (m && m[2].length < n ? m[1].slice(0, n - m[2].length).replace(/[. ]+$/, '') + m[2] : s.slice(0, n).replace(/[. ]+$/, '')); };
-  const safe = s => String(s || '').replace(/[\\/:*?"<>|\x00-\x1F]/g, '_').replace(/\s+/g, ' ').trim().slice(0, 90).replace(/[. ]+$/, '');
+  // Names must also be accepted by Chrome's folder API (no '~', invisible format characters, leading dots, …).
+  const portable = (s, fallback = '') => window.TIPSDocumentsClient ? window.TIPSDocumentsClient.portableName(s, fallback)
+    : String(s || '').replace(/[\\/:*?"<>|~\x00-\x1F]/g, '_').replace(/\s+/g, ' ').trim().replace(/^[. ]+|[. ]+$/g, '') || fallback;
+  const clip = (s, n) => { s = portable(s); if (s.length <= n) return s; const m = s.match(/^(.*?)(\.[A-Za-z0-9]{1,5})$/);
+    return portable(m && m[2].length < n ? m[1].slice(0, n - m[2].length) + m[2] : s.slice(0, n)); };
+  const safe = s => portable(portable(s).slice(0, 90));
   const topicName = item => clip(item.title, 45) ? `${safe(item.tips)} - ${clip(item.title, 45)}` : safe(item.tips);
   const csvEsc = window.TIPSIndexCsv.escape;
   const loc = o => o ? (o.en || Object.values(o)[0] || '') : '';
@@ -352,7 +355,8 @@
       const previous = new Map(S.index.map(x => [x.tips.toUpperCase() + ':' + String(x.tipsId), x]));
       S.index = list.sort((a, b) => a.tips.localeCompare(b.tips)).map(x => {
         const old = previous.get(x.tips.toUpperCase() + ':' + String(x.tipsId));
-        return { ...x, ...(old?.exceptions ? { exceptions: old.exceptions } : {}), ...(old?.attachmentInventory ? { attachmentInventory: old.attachmentInventory } : {}) };
+        return { ...x, ...(old?.exceptions ? { exceptions: old.exceptions } : {}), ...(old?.attachmentInventory ? { attachmentInventory: old.attachmentInventory } : {}),
+          ...(old?.priorAttachmentsChecked ? { priorAttachmentsChecked: old.priorAttachmentsChecked } : {}) };
       });
       await saveIndex();
     } finally { S.checking = false; }
@@ -479,9 +483,10 @@
     if (r.status) S.documents = r.status;
     return r;
   }
-  async function syncDocumentsIndex({ exceptionEvents = [], attachmentUpdates = [] } = {}) {
+  async function syncDocumentsIndex({ exceptionEvents = [], attachmentUpdates = [] } = {}, priorChecks = []) {
     const csv = window.TIPSIndexCsv, events = csv.applyExceptionEvents(S.index, exceptionEvents);
-    const attachments = csv.applyAttachmentInventories(events.index, attachmentUpdates);
+    const inventories = csv.applyAttachmentInventories(events.index, attachmentUpdates);
+    const checks = csv.applyPriorChecks(inventories.index, priorChecks), attachments = { index: checks.index, changed: inventories.changed || checks.changed };
     if (events.changed || attachments.changed) {
       const previous = S.index;
       S.index = attachments.index;
@@ -530,7 +535,7 @@
       render();
     }
   }
-  async function updateDocuments({ auto = false, retryExceptions = false, includeMissing } = {}) {
+  async function updateDocuments({ auto = false, retryExceptions = false, priorAttachments = false, includeMissing } = {}) {
     if (busy() || S.checking || S.single?.phase === 'looking' || !S.documents.configured) return;
     if (!sessionOK()) { S.documentResult = 'Open a TIPS topic to detect your session, then update again.'; render(); return; }
     const client = window.TIPSDocumentsClient;
@@ -543,22 +548,25 @@
     const check = () => { if (run.cancel) throw Error('Folder update stopped.'); };
     try {
       const planned = await documentsRequest('start', { token: run.token, snapshot: documentsSnapshot(), options: { auto, retryExceptions,
-        includeMissing: includeMissing ?? (!auto && (S.documentsIncludeMissing || retryExceptions)) } });
+        includeMissing: !priorAttachments && (includeMissing ?? (!auto && (S.documentsIncludeMissing || retryExceptions))) } });
       started = true; await acceptDocumentInventory(planned.inventory);
       const indexed = new Map(S.index.map(x => [x.tips.toUpperCase(), x]));
       const eligible = planned.topics.filter(t => indexed.has(t.tips));
-      const topics = eligible.filter(t => retryExceptions ? client.excludedVersions(indexed.get(t.tips)).some(v => v <= +indexed.get(t.tips).version) : client.needsUpdate(t, indexed.get(t.tips)));
+      const topics = eligible.filter(t => priorAttachments ? client.needsPriorAttachments(t, indexed.get(t.tips)) : retryExceptions ? client.excludedVersions(indexed.get(t.tips)).some(v => v <= +indexed.get(t.tips).version) : client.needsUpdate(t, indexed.get(t.tips)));
       summary.skippedTopics = eligible.length - topics.length;
       run.total = topics.length;
       for (const topic of topics) {
         check(); run.i++; run.label = `${topic.tips} · ${run.i}/${run.total} selected for update`; render();
         const item = { ...indexed.get(topic.tips), tips: topic.tips }, files = [], errors = [];
         const excluded = client.excludedVersions(item);
-        active = { tips: topic.tips, version: +item.version, mdate: item.mdate, policy: policyKey, ok: false, retryOnly: retryExceptions, exceptions: [], resolvedVersions: [], unavailable: (item.exceptions || []).filter(x => x.kind === 'unavailable').map(x => x.version) };
+        active = { tips: topic.tips, version: +item.version, mdate: item.mdate, policy: policyKey, ok: false, retryOnly: retryExceptions || priorAttachments, exceptions: [], resolvedVersions: [], unavailable: (item.exceptions || []).filter(x => x.kind === 'unavailable').map(x => x.version) };
         // Persist retry intent before fetching, scrubbing or writing can fail/stop.
         await documentsRequest('topic-start', { token: run.token, tips: topic.tips });
         item.opts = { documentFolder: true, existingVersions: [...topic.versions, ...excluded],
-          retryVersions: retryExceptions ? excluded.filter(v => v <= +item.version) : null, att: !retryExceptions && client.needsAttachments(topic, item) };
+          retryVersions: retryExceptions ? excluded.filter(v => v <= +item.version) : null,
+          att: priorAttachments || (!retryExceptions && client.needsAttachments(topic, item)), priorOnly: priorAttachments,
+          // Earlier versions already read for removed attachments are not read again.
+          priorFrom: client.priorChecked(topic, item) + 1 };
         let stop = null;
         try {
           const stats = await exportDoc(item, files, errors, label => { check(); run.label = `${topic.tips} · ${run.i}/${run.total} selected · ${label}`; render(); }, policy);
@@ -569,14 +577,16 @@
           for (const file of files) {
             check(); const path = file.name.slice(file.name.indexOf('/') + 1);
             run.label = `${topic.tips} · saving ${path}`; render();
-            const saved = await client.write(documentsRequest, run.token, topic.tips, stats.version, { path, data: file.data }, () => run.cancel);
+            const saved = await client.write(documentsRequest, run.token, topic.tips, file.version || stats.version, { path, data: file.data }, () => run.cancel);
             if (saved.skip) summary.skipped++; else if (saved.kind === 'pdf') summary.pdfs++; else summary.attachments++;
             if (saved.kind === 'pdf') active.resolvedVersions.push(+/_v(\d+)\.pdf$/i.exec(path)[1]);
           }
           const accounted = topic.versions.includes(+stats.version) || active.resolvedVersions.includes(+stats.version) || excluded.includes(+stats.version) || active.exceptions.some(x => x.version === +stats.version);
-          if (!retryExceptions && !accounted && !classified.remaining.length) classified.remaining.push(`${topic.tips}: latest PDF was not saved.`);
+          if (!retryExceptions && !priorAttachments && !accounted && !classified.remaining.length) classified.remaining.push(`${topic.tips}: latest PDF was not saved.`);
           active.failure = classified.remaining.join('; ');
           active.ok = !active.failure;
+          if (stats.priorAttachmentsThrough != null) active.priorAttachmentsThrough = stats.priorAttachmentsThrough;
+          summary.priorAttachments = (summary.priorAttachments || 0) + (stats.priorAttachments || 0);
         } catch (e) {
           active.exceptions = client.classifyErrors(item, errors).exceptions;
           active.failure = `${topic.tips}: ${e.message}`; errors.push(active.failure);
@@ -584,8 +594,10 @@
         }
         active.unavailable = [...new Set([...active.unavailable, ...active.exceptions.filter(x => x.kind === 'unavailable').map(x => x.version)])].filter(v => !active.resolvedVersions.includes(v));
         summary.errors.push(...errors); if (active.failure && !errors.length) summary.errors.push(active.failure);
+        const through = active.priorAttachmentsThrough;
         const committed = await documentsRequest('topic-done', { token: run.token, result: active }); active = null;
-        await syncDocumentsIndex(committed);
+        // Record the earlier-version check in the portable index log so a reinstall or a reconnected folder keeps it.
+        await syncDocumentsIndex(committed, through != null ? [{ tips: item.tips, tipsId: item.tipsId, through }] : []);
         summary.topics++;
         if (stop) throw stop;
         if (run.i < run.total) { const until = Date.now() + randDelay(); while (Date.now() < until) { check(); await sleep(Math.min(250, until - Date.now())); } }
@@ -604,7 +616,8 @@
         catch (e) { summary.errors.push(e.message); }
       }
       S.documentResult = run.cancel ? 'Update stopped. Completed files were kept.' : started && !run.total ? 'No documents selected for download. No document requests made. See the inventory for any unresolved discrepancies.' : `${summary.topics} document(s) processed · ${summary.pdfs} PDF(s) and ${summary.attachments} attachment(s) added · ${summary.skipped} unchanged file(s) skipped.`;
-      if (summary.skippedTopics) S.documentResult += ` ${summary.skippedTopics} unchanged document(s) skipped without TIPS requests.`;
+      if (summary.priorAttachments) S.documentResult += ` ${summary.priorAttachments} of the attachments came from earlier versions.`;
+      if (summary.skippedTopics) S.documentResult += ` ${summary.skippedTopics} ${priorAttachments ? 'document(s) already checked for earlier-version attachments' : 'unchanged document(s)'} skipped without TIPS requests.`;
       if (summary.errors.length) S.documentResult += ` ${summary.errors.length} issue(s):\n` + summary.errors.slice(0, 100).join('\n');
       if (started) {
         try { await acceptDocumentInventory((await documentsRequest('inventory', { snapshot: documentsSnapshot() })).inventory); }
@@ -690,7 +703,7 @@
     }
     return false;
   }
-  async function addDownload(files, errors, stats, name, response, policy) {
+  async function addDownload(files, errors, stats, name, response, policy, extra = null) {
     let data = new Uint8Array(await response.arrayBuffer());
     if (policy.enabled && isPdfDownload(name, response, data)) {
       try {
@@ -707,7 +720,7 @@
         return false;
       }
     }
-    files.push({ name, data });
+    files.push(extra ? { name, data, ...extra } : { name, data });
     return true;
   }
 
@@ -728,7 +741,7 @@
         errors.push(`${item.tips}: v${unavailableVersion} not available in TIPS`);
       } else throw new Error('topic data HTTP ' + jr.status);
     }
-    const v = doc.version || item.version, want = n => n !== unavailableVersion && (!o || (o.documentFolder ? o.retryVersions ? o.retryVersions.includes(n) : !o.existingVersions.includes(n) : o.versions.includes(n)));
+    const v = doc.version || item.version, want = n => n !== unavailableVersion && !o?.priorOnly && (!o || (o.documentFolder ? o.retryVersions ? o.retryVersions.includes(n) : !o.existingVersions.includes(n) : o.versions.includes(n)));
     let transient = 0;   // files that failed for a temporary reason (server/network) – the document is retried later
     const failed = e => { if (e instanceof SessionError) throw e; if (e instanceof TransientError || (e && e.name === 'TypeError') || e.transient) transient++; };
     const F = o?.documentFolder ? {} : S.settings.files;
@@ -743,27 +756,70 @@
     }
 
     const atts = doc.attachments || [], refs = doc.references || [];
-    let nAtt = 0;
-    if ((atts.length || refs.length) && (!o || o.att)) {
-      const dir = `${base}/Attachments and Links`;
-      const lines = ['type,filename_or_target,description,created'];
-      const used = new Set();
+    const dir = `${base}/Attachments and Links`, used = new Set(), lines = ['type,filename_or_target,description,created'];
+    const wantAtt = !o || o.att, priorOnly = !!o?.priorOnly;
+    let nAtt = 0, nPriorAtt = 0, priorAttachmentsThrough = null;
+    const fetchAttachment = async a => {
+      const rk = new URL(a.dataUrl).searchParams.get('readKey');
+      const ur = await get('/ats/public/attachment/v1/read/download/url?readKey=' + encodeURIComponent(rk), 'application/json');
+      if (!ur.ok) throw new Error('url HTTP ' + ur.status);
+      const uj = await ur.json(); const s3 = uj.url.startsWith('http') ? uj.url : 'https://' + uj.url;
+      const br = await fetch(s3); if (!br.ok) throw Object.assign(new Error('HTTP ' + br.status), { transient: br.status >= 500 || br.status === 403 });   // 403: signed link expired
+      return br;
+    };
+    if (wantAtt && !priorOnly && (atts.length || refs.length)) {
       for (const [k, a] of atts.entries()) {
         let fn = clip(a.filename || ('attachment_' + a.attId), 60); while (used.has(fn.toLowerCase())) fn = '_' + fn; used.add(fn.toLowerCase());
         lines.push([a.type, fn, loc(a.i18nDescription), a.creationDate].map(csvEsc).join(','));
         step(`attachment ${k + 1}/${atts.length}`, { g: 'att', k: k + 1, n: atts.length });
         try {
-          const rk = new URL(a.dataUrl).searchParams.get('readKey');
-          const ur = await get('/ats/public/attachment/v1/read/download/url?readKey=' + encodeURIComponent(rk), 'application/json');
-          if (!ur.ok) throw new Error('url HTTP ' + ur.status);
-          const uj = await ur.json(); const s3 = uj.url.startsWith('http') ? uj.url : 'https://' + uj.url;
-          const br = await fetch(s3); if (!br.ok) throw Object.assign(new Error('HTTP ' + br.status), { transient: br.status >= 500 || br.status === 403 });   // 403: signed link expired
-          if (await addDownload(files, errors, stats, `${dir}/${fn}`, br, policy)) nAtt++;
+          const br = await fetchAttachment(a);
+          if (await addDownload(files, errors, stats, `${dir}/${fn}`, br, policy, { attId: a.attId })) nAtt++;
         } catch (e) { failed(e); errors.push(`${item.tips}: attachment "${fn}" ${e.message}`); }
       }
       for (const r of refs) lines.push(['link/reference', r.tips || r.target || r.url || r.docNumber || JSON.stringify(r), loc(r.i18nTitle) || r.title || '', ''].map(csvEsc).join(','));
-      if (F.attCsv) files.push({ name: `${dir}/_attachments_and_links.csv`, data: txt(lines.join('\r\n')) });
     }
+
+    // Attachments that were removed in a later revision only exist in the older versions' topic data.
+    // Read versions priorFrom…v-1, keep each attachment once (by ID / read key) with the last version that listed it.
+    const priorFrom = Math.max(1, +o?.priorFrom || 1);
+    if (wantAtt && S.settings.priorAttachments !== false && v > 1 && priorFrom < v) {
+      const key = a => String(a.attId ?? '') || (() => { try { return new URL(a.dataUrl).searchParams.get('readKey') || a.dataUrl; } catch (_) { return String(a.dataUrl || a.filename); } })();
+      const current = new Set(atts.map(key)), found = new Map();
+      let scanOk = true;
+      for (let pv = priorFrom; pv < v; pv++) {
+        step(`attachments of v${pv}`, { g: 'priorAtt', k: pv - priorFrom + 1, n: v - priorFrom, v: pv });
+        try {
+          const jr = await get(`/tips/topic-service/api/v1/topics/${item.tipsId}/${pv}?${Q()}`, 'application/json');
+          if (jr.status === 404) continue;   // that version is gone from TIPS; nothing to read
+          if (!jr.ok) throw Object.assign(new Error('HTTP ' + jr.status), { transient: true });
+          for (const a of ((await jr.json()).attachments || [])) {
+            const k = key(a); if (!a.dataUrl || current.has(k)) continue;
+            const f = found.get(k); if (f) f.last = pv; else found.set(k, { a, first: pv, last: pv });
+          }
+        } catch (e) { scanOk = false; failed(e); errors.push(`${item.tips}: attachment list of v${pv}: ${e.message}`); }
+        await sleep(150);
+      }
+      const list = [...found.values()];
+      for (const [k, x] of list.entries()) {
+        const a = x.a, range = x.first === x.last ? `v${x.first}` : `v${x.first}-v${x.last}`;
+        let fn = clip(a.filename || ('attachment_' + a.attId), 60);
+        if (used.has(fn.toLowerCase())) {
+          const dot = fn.lastIndexOf('.'), stem = dot > 0 ? fn.slice(0, dot) : fn, ext = dot > 0 ? fn.slice(dot) : '';
+          let n = 1; do { fn = clip(`${stem} (v${x.last}${n > 1 ? '-' + n : ''})${ext}`, 60); n++; } while (used.has(fn.toLowerCase()));
+        }
+        used.add(fn.toLowerCase());
+        lines.push([`${a.type || ''} (${range} only)`, fn, loc(a.i18nDescription), a.creationDate].map(csvEsc).join(','));
+        step(`earlier attachment ${k + 1}/${list.length}`, { g: 'priorAtt', dl: true, k: k + 1, n: list.length });
+        try {
+          const br = await fetchAttachment(a);
+          if (await addDownload(files, errors, stats, `${dir}/${fn}`, br, policy, { attId: a.attId, version: x.last })) { nAtt++; nPriorAtt++; }
+          else scanOk = false;
+        } catch (e) { scanOk = false; failed(e); errors.push(`${item.tips}: attachment "${fn}" (${range}) ${e.message}`); }
+      }
+      if (scanOk) priorAttachmentsThrough = v - 1;
+    }
+    if (wantAtt && !priorOnly && F.attCsv && lines.length > 1) files.push({ name: `${dir}/_attachments_and_links.csv`, data: txt(lines.join('\r\n')) });
 
     const hist = (doc.history && doc.history.children) || [];
     const rdir = `${base}/Revision History`;
@@ -789,7 +845,7 @@
       }
       await sleep(150);
     }
-    return { version: v, attachments: nAtt, attachmentsListed: atts.length, links: refs.length, prevVersions: nPrev, histEvents: hist.length, transient, ...stats };
+    return { version: v, attachments: nAtt, attachmentsListed: atts.length, priorAttachments: nPriorAtt, priorAttachmentsThrough, links: refs.length, prevVersions: nPrev, histEvents: hist.length, transient, ...stats };
   }
 
   // ---------------------------------------------------------------- run documents -> zip
@@ -817,12 +873,13 @@
         }
         while (S.run.paused && !S.run.cancel) await sleep(400);
         if (S.run.cancel) throw new Error('cancelled');
-        S.run.i++; S.run.label = it.tips; S.run.step = null; S.run.attN = 0; S.run.curPdf = false; render();
+        S.run.i++; S.run.label = it.tips; S.run.step = null; S.run.attN = 0; S.run.priorAttN = 0; S.run.curPdf = false; render();
         const fMark = files.length, eMark = errors.length;
         try {
           const r = await exporter(it, files, errors, (s, info) => {
             S.run.label = `${it.tips} – ${s}`; S.run.step = info || null;
             if (info && info.g === 'att') S.run.attN = info.n;
+            if (info && info.g === 'priorAtt' && info.dl) S.run.priorAttN = info.n;
             if (info && info.g === 'pdf') S.run.curPdf = true;
             if (S.run.kind !== 'bulk') renderRunBox(); else renderProgress();
           }, pdfPolicy);
@@ -1148,6 +1205,11 @@
   .fld input{width:150px;height:40px;padding:0 12px;border:1px solid var(--stroke);border-radius:0;font:14px var(--f);color:var(--tx)} .fld input.s{width:80px}
   details summary{cursor:pointer;height:40px;display:flex;align-items:center;justify-content:space-between;padding:0 16px;border:1px solid var(--stroke);color:var(--lab);list-style:none}
   details summary::-webkit-details-marker{display:none}
+  details summary::after{content:'';width:8px;height:8px;border:solid var(--lab);border-width:0 1.5px 1.5px 0;transform:rotate(45deg) translateY(-2px);transition:transform .15s}
+  details[open]>summary::after{transform:rotate(-135deg) translate(-2px,0)}
+  .dbody{display:flex;flex-direction:column;gap:12px;padding:12px 16px 16px;border:1px solid var(--stroke);border-top:0;background:#fff}
+  .dbody .opt{display:flex;flex-direction:column;align-items:stretch;gap:6px} .dbody .opt+.opt{padding-top:12px;border-top:1px solid var(--div)}
+  .dbody .b{white-space:normal;text-align:center} .dbody .b.sm{align-self:flex-start}
   pre{white-space:pre-wrap;font-size:12px;max-height:140px;overflow:auto;background:#fff;padding:6px;margin:6px 0 0}
   table{width:100%;border-collapse:collapse;font-size:13px;margin-top:8px} td,th{padding:6px 4px;border-bottom:1px solid var(--div);text-align:left} th{font-weight:700}
   code{font-size:12px;color:var(--lab)}
@@ -1265,14 +1327,16 @@
       ${sg.found.length ? `<span class="mut sm">Saves as ${esc(selectionName(sg.found))}</span>` : ''}`;
   }
   function vSingleRun(run) {
-    const doneN = run.results.length, st = run.step, gi = st ? ['data', 'pdf', 'att', 'prior'].indexOf(st.g) : -1;
-    const frac = !st ? 0 : st.g === 'data' ? .1 : st.g === 'pdf' ? .2 : st.g === 'att' ? .2 + .3 * st.k / st.n : .5 + .5 * st.k / st.n;
+    const doneN = run.results.length, st = run.step, gi = st ? ['data', 'pdf', 'att', 'priorAtt', 'prior'].indexOf(st.g) : -1;
+    const frac = !st ? 0 : st.g === 'data' ? .1 : st.g === 'pdf' ? .2 : st.g === 'att' ? .2 + .3 * st.k / st.n : st.g === 'priorAtt' ? .5 + .1 * st.k / st.n : .6 + .4 * st.k / st.n;
     let steps = '';
     if (st) {
       const L = [];
       L.push(gi <= 1 ? ['cur', st.g === 'data' ? 'Topic data' : `Current PDF v${esc(st.v)}`] : ['done', run.curPdf ? 'Topic data &amp; current PDF' : 'Topic data']);
       if (run.attN) L.push(gi === 2 ? ['cur', `Attachment ${st.k} of ${st.n}`] : gi > 2 ? ['done', `${run.attN} attachment${run.attN > 1 ? 's' : ''}`] : null);
-      if (gi === 3) L.push(['cur', `Prior version v${esc(st.v)} – ${st.k} of ${st.n}`]);
+      if (gi === 3) L.push(['cur', st.dl ? `Earlier-version attachment ${st.k} of ${st.n}` : `Checking v${esc(st.v)} for removed attachments – ${st.k} of ${st.n}`]);
+      if (gi > 3 && run.priorAttN) L.push(['done', `${run.priorAttN} attachment${run.priorAttN > 1 ? 's' : ''} from earlier versions`]);
+      if (gi === 4) L.push(['cur', `Prior version v${esc(st.v)} – ${st.k} of ${st.n}`]);
       steps = `<ol class="steps">${L.filter(Boolean).map(([k, t]) => k === 'done' ? `<li class="mut"><span class="okc">✓</span>${t}</li>` : `<li><span class="acc spin">${svg('<circle cx="12" cy="12" r="8" stroke-opacity=".25"></circle><path d="M12 4a8 8 0 0 1 8 8"></path>', 16, 2.4)}</span>${t}</li>`).join('')}</ol>`;
     }
     return `<div class="sec"><div class="sp"><h3>Downloading</h3><span style="font-size:16px">Document ${Math.min(doneN + 1, run.total)} of ${run.total}</span></div>${pbar(100 * (doneN + frac) / run.total, false, 'pbar')}</div>
@@ -1346,17 +1410,23 @@
     return `<div class="sec" style="border-top:1px solid var(--div);padding-top:16px"><h3>Inventory &amp; status</h3>
       <span class="mut sm">Scan &amp; verify inventories local attachments into the main index log without TIPS requests.</span>
       <button class="b bar" id="doc_scan" ${disabled ? 'disabled' : ''}>Scan &amp; verify</button>
-      <details><summary>Folder repair options</summary><button class="b bar" id="doc_update" ${disabled ? 'disabled' : ''}>Repair using current index</button>
-      <label class="ck"><input type="checkbox" id="doc_missing" ${S.documentsIncludeMissing ? 'checked' : ''} ${disabled ? 'disabled' : ''}> Include missing documents from index in a manual update</label>
-      <button class="b bar sm" id="doc_folder" ${busy() || S.checking ? 'disabled' : ''}>Choose / change documents folder…</button></details>
+      <details id="doc_repair"><summary>Folder repair options</summary><div class="dbody">
+        <div class="opt"><button class="b bar full" id="doc_update" ${disabled ? 'disabled' : ''}>Repair using current index</button>
+          <span class="mut sm">Uses the loaded index without a new TIPS search. Saves missing PDF versions and missing or changed attachments.</span>
+          <label class="ck sm"><input type="checkbox" id="doc_missing" ${S.documentsIncludeMissing ? 'checked' : ''} ${disabled ? 'disabled' : ''}> Also download indexed documents missing from this folder</label></div>
+        <div class="opt"><button class="b bar full" id="doc_prior" ${disabled || S.settings.priorAttachments === false ? 'disabled' : ''}>Get attachments from earlier versions</button>
+          <span class="mut sm">${S.settings.priorAttachments === false ? 'Turn on <b>Attachments removed in earlier versions</b> under ⚙ → Attachments to use this.' : 'One-time catch-up. Reads each earlier version once and saves photos and files a later revision removed. Already-checked documents are skipped and no PDFs are requested. New versions are covered by normal syncs.'}</span></div>
+        <div class="opt"><button class="b bar full" id="doc_folder" ${busy() || S.checking ? 'disabled' : ''}>Choose / change documents folder…</button>
+          <span class="mut sm">${esc(s.configured ? 'Current: ' + s.folderName + ' / [LI folder] / ' + s.attachmentFolder : 'No documents folder selected.')}</span></div>
+      </div></details>
       ${run ? `<span role="status">${esc(run.label)}</span>${!run.scan ? `<button class="b dan" id="doc_stop" ${run.cancel ? 'disabled' : ''}>${run.cancel ? 'Stopping…' : 'Stop folder update'}</button>` : ''}` : ''}
       <pre class="sm" id="doc_status" role="status" style="white-space:pre-wrap">${esc(S.documentResult || s.message || '')}</pre>${report}
-      <details id="doc_exceptions"><summary>Index errors and exceptions (${exceptions.length})</summary>
+      <details id="doc_exceptions"><summary>Index errors and exceptions (${exceptions.length})</summary><div class="dbody">
         <span class="mut sm">${excluded.length} excluded PDF versions · ${retryable} retryable document errors. Confirmed unavailable or unreadable versions are omitted from required coverage and routine requests. Temporary failures remain actionable.</span>
         ${exceptions.length ? `<pre style="white-space:pre-wrap">${esc(exceptions.slice(0,100).map(x => `${x.tips} v${x.version} · ${x.kind}\n${x.reason}\n${x.at}`).join('\n\n'))}</pre>${exceptions.length > 100 ? '<span class="mut sm">First 100 shown. Save the main log or inventory CSV for the full list.</span>' : ''}` : '<span class="mut sm">No recorded document errors.</span>'}
         <button class="b bar sm" id="doc_retry" ${disabled || !excluded.length ? 'disabled' : ''}>Retry excluded versions</button>
         <span class="mut sm">Retries only excluded PDFs, including in missing document folders. Attachments are not requested. Successful saves clear the matching exceptions.</span>
-      </details></div>`;
+      </div></details></div>`;
   }
   function vBulk() {
     const s = S.settings, run = S.run && S.run.kind === 'bulk' ? S.run : null, pen = S.pending, dc = doneCount(), nb = nextBatch(), pendN = pendingItems().length;
@@ -1437,6 +1507,10 @@
         <span class="mut">${esc(S.documents.configured ? S.documents.folderName : 'No documents folder selected')}</span>
         <span class="mut sm">Inventory saved LI/GI documents against the index log, add missing PDF versions and keep older attachments. Sync and scan controls are in Library.</span>
         <button class="b bar" id="s_documentsFolder" ${busy() || S.checking ? 'disabled' : ''}>Choose / change documents folder…</button>
+      </div>
+      <div class="sec" style="padding-top:12px;border-top:1px solid var(--div)"><b>Attachments</b>
+        <label class="ck"><input type="checkbox" id="s_priorAtt" ${s.priorAttachments !== false ? 'checked' : ''} ${busy() || S.documentRun ? 'disabled' : ''}> Attachments removed in earlier versions</label>
+        <span class="mut sm">On by default. Photos and files that a later revision dropped are only listed in older versions. Each earlier version's topic data is read once (one extra request per version) and those files are saved in Attachments and Links beside the current ones. A name clash gets the last version that had it, e.g. <code>photo (v24).png</code>. Applies to ZIP downloads and Library sync.</span>
       </div>
       <details id="settings_zip"><summary>Advanced ZIP contents</summary><div class="sec"><b>Data files to include</b><span class="mut">All PDF versions share the topic folder; attachments go in Attachments and Links. Optional data files are off by default. Any failures are listed in the export errors.</span>
         <div class="fgrid">
@@ -1572,6 +1646,7 @@
     on('doc_scan', 'onclick', safeRun(scanDocuments));
     on('doc_update', 'onclick', safeRun(() => updateDocuments()));
     on('doc_retry', 'onclick', safeRun(() => updateDocuments({ retryExceptions: true })));
+    on('doc_prior', 'onclick', safeRun(() => updateDocuments({ priorAttachments: true })));
     on('doc_missing', 'onchange', e => { S.documentsIncludeMissing = e.target.checked; });
     on('doc_stop', 'onclick', () => { if (S.documentRun) { S.documentRun.cancel = true; render(); } });
     on('doc_report', 'onclick', () => { if (S.documentInventory) saveBlob(new Blob([window.TIPSDocumentsClient.csv(S.documentInventory)], { type: 'text/csv' }), `TIPS_folder_inventory_${new Date().toISOString().slice(0, 10)}.csv`); });
@@ -1615,6 +1690,7 @@
     on('f_csv', 'onclick', () => preset({ docJson: false, histCsv: true, histJson: false, attCsv: true, manifest: true }));
     on('f_json', 'onclick', () => preset({ docJson: true, histCsv: false, histJson: true, attCsv: false, manifest: false }));
     on('f_none', 'onclick', () => preset({ docJson: false, histCsv: false, histJson: false, attCsv: false, manifest: false }));
+    on('s_priorAtt', 'onchange', async e => { if (busy() || S.documentRun) return; s.priorAttachments = e.target.checked; await saveSettings(); render(); });
     on('s_check', 'onclick', () => { diag = checkSetup(); render(); });
     on('s_detect', 'onclick', async () => {
       if (busy() && s.pdfScrub.enabled) return;
@@ -2018,6 +2094,7 @@
   function renderPick(focusId) {
     const p = pick; if (!p) return;
     const it = p.item, d = p.doc, atts = d ? (d.attachments || []).length : 0, refs = d ? (d.references || []).length : 0;
+    const prior = !!d && p.vers.length > 1 && S.settings.priorAttachments !== false, anyAtt = atts + refs > 0 || prior;
     const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
     let body;
     if (p.err) body = `<div class="ban er"><div class="bd sm">${esc(p.err)}</div></div>`;
@@ -2026,7 +2103,7 @@
       <div class="vl" role="group" aria-label="Versions">${p.vers.map((x, i) => `<label class="ck vr"><input type="checkbox" data-v="${x.v}" ${p.sel.has(x.v) ? 'checked' : ''}>
         <span class="bd"><span class="l1"><span>v${x.v}</span>${i === 0 ? '<span class="tag">current</span>' : ''}<span class="mut sm dt">${esc(x.date)}</span></span>
         ${x.why ? `<span class="mut sm one" title="${esc(x.why)}">${esc(x.why)}</span>` : ''}</span></label>`).join('')}</div>
-      ${atts + refs ? `<label class="ck"><input type="checkbox" id="p_att" ${p.att ? 'checked' : ''}> Include ${atts && refs ? 'attachments and links' : atts ? 'attachments' : 'the links list'} <span class="mut sm">(${[atts && plural(atts, 'file'), refs && plural(refs, 'link')].filter(Boolean).join(', ')})</span></label>`
+      ${anyAtt ? `<label class="ck"><input type="checkbox" id="p_att" ${p.att ? 'checked' : ''}> Include ${atts && refs ? 'attachments and links' : atts || prior ? 'attachments' : 'the links list'} <span class="mut sm">(${[atts + refs ? `current: ${[atts && plural(atts, 'file'), refs && plural(refs, 'link')].filter(Boolean).join(', ')}` : 'none in the current version', prior && 'plus files removed in earlier versions'].filter(Boolean).join('; ')})</span></label>`
         : '<span class="mut sm">This topic has no attachments or links.</span>'}`;
     proot.innerHTML = `<style>${css}</style><div class="pk" role="dialog" aria-modal="false" aria-label="Download ${esc(it.tips)}">
       <div class="phd"><div class="bd"><b>Download ${esc(it.tips)}</b><span class="mut sm one" title="${esc(it.title)}">${esc(it.title)}</span></div>
@@ -2047,7 +2124,7 @@
       $('p_cur').onclick = () => setAll([p.vers[0].v]);
       if ($('p_att')) $('p_att').onchange = e => { p.att = e.target.checked; };
       go.onclick = () => { if (!p.sel.size) return; const versions = [...p.sel].sort((a, b) => a - b);
-        closePick({ versions, att: !!(p.att && atts + refs), allVers: versions.length === p.vers.length, dropAtt: !p.att && atts + refs > 0, doc: d }); };
+        closePick({ versions, att: !!(p.att && anyAtt), allVers: versions.length === p.vers.length, dropAtt: !p.att && anyAtt, doc: d }); };
     }
     upd(); placePick();
     const f = focusId && $(focusId); if (f && !f.disabled) f.focus();

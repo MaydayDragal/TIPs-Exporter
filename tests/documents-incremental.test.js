@@ -25,7 +25,8 @@ const topic = extra => ({ tips: LI, versions: [1,2,3,4,5], missingAttachments: [
     const c = await content(e);
     try {
       await update(c, e);
-      assert.equal(c.requests.length, 4, 'one metadata request, one missing PDF, one attachment URL, one attachment download');
+      assert.equal(c.requests.length, 8, 'one metadata request, one missing PDF, one attachment URL, one attachment download, plus a one-time read of v1–v4 for removed attachments');
+      assert.equal(c.requests.filter(u => /\/topics\/101\/[1-4]\?/.test(u)).length, 4);
       assert(!c.requests.some(u => u.includes('/search') || u.includes('/topics/102/')));
       await assertSavedPdf(e.d, `${TOPIC}/${LI}_v5.pdf`, 5);
       assert.equal(await e.d.read(`${TOPIC}/Attachments and Links/photo.jpg`), 'old photo');
@@ -70,7 +71,7 @@ const topic = extra => ({ tips: LI, versions: [1,2,3,4,5], missingAttachments: [
     try {
       c.$('doc_scan').click(); await until(() => c.$('doc_report')); assert.deepEqual(c.requests, []);
       c.close(); e.state.index[0].mdate = '2026-10-09'; c = await content(e); c.active.mdate = '2026-10-09';
-      await update(c, e); assert.equal(c.requests.length, 3); assert(!c.requests.some(u => u.includes('/search')));
+      await update(c, e); assert.equal(c.requests.length, 7, '3 for the change plus the one-time v1–v4 read for removed attachments'); assert(!c.requests.some(u => u.includes('/search')));
       assert.equal(await e.d.read(`${TOPIC}/Attachments and Links/photo (v5).jpg`), 'new photo');
     } finally { c.close(); }
   });
