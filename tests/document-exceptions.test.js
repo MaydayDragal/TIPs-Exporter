@@ -41,7 +41,11 @@ async function test(name, fn) { try { await fn(); console.log('PASS ' + name); }
     const errors = [`${LI}: v3 not available in TIPS`, `${LI} - Test (Requested)/${LI}_v2.pdf: PDF scrub failed (unsupported, damaged, or unreadable PDF); PDF omitted.`, `${LI}: v1 HTTP 503`, `${LI} - Test (Requested)/${LI}_v4.pdf: PDF scrub failed (PDF engine unavailable; reload the extension and TIPS tab); PDF omitted.`, `${LI} - Test (Requested)/Attachments and Links/${LI}_v4.pdf: PDF scrub failed (encrypted PDF); PDF omitted.`];
     const result = Client.classifyErrors(item, errors, AT);
     assert.deepEqual(result.exceptions.map(x => [x.version, x.kind]), [[2,'scrub_failed'],[3,'unavailable']]);
-    assert.equal(result.remaining.length, 3); assert(result.remaining.includes(errors[2])); assert(result.remaining.includes(errors[3]));
+    assert.equal(result.remaining.length, 2); assert(result.remaining.includes(errors[2])); assert(result.remaining.includes(errors[3]));
+    // An attached PDF that cannot be cleaned is left out and reported once. It is not a version exception, and since 1.21.0
+    // it is not a reason to request the document again on every sync; a missing PDF engine still is.
+    assert(!result.remaining.includes(errors[4])); assert(!result.exceptions.some(x => x.version === 4));
+    assert.equal(Client.classifyErrors(item, [`${LI} - Test (Requested)/Attachments and Links/guide.pdf: PDF scrub failed (PDF engine unavailable; reload the extension and TIPS tab); PDF omitted.`], AT).remaining.length, 1);
     assert.equal(Client.classifyErrors(item, [`${LI}: current PDF HTTP 404`], AT).exceptions[0].version, 4);
   });
   await test('excluded gaps and invalid copies leave the actionable scan while the catalogue remains intact', async () => {

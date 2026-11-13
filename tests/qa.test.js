@@ -183,7 +183,7 @@ const ok = (c, m) => { console.log((c ? 'PASS ' : 'FAIL ') + m); if (!c) process
     ok(!note && /When TIPS loaded: .*1 new topic/.test(e.text()), 'drawer already open when the load-time check finds something: message in the drawer, no popup on top');
   }
 
-  // Q7. empty title → LI number and Requested label (no trailing " - ")
+  // Q7. empty title → LI number alone (no trailing " - ", and no "(Requested)" label since 1.21.0)
   {
     const topics = [{ tips: 'LI42.10-P-078779', tipsId: 101, version: 1, title: '' }];
     const e = makeEnv({ fetch: makeFetch({ topics }), extra: { index: [], done: {} } });
@@ -192,7 +192,7 @@ const ok = (c, m) => { console.log((c ? 'PASS ' : 'FAIL ') + m); if (!c) process
     e.$('dlfound').click(); await waitFor(() => /Saved to Downloads/.test(e.text()));
     const ab = await e.saved[0].blob.arrayBuffer();
     const txtz = Buffer.from(ab).toString('latin1');
-    ok(/LI42\.10-P-078779 \(Requested\)\/LI42\.10-P-078779_v1\.pdf/.test(txtz) && !/LI42\.10-P-078779 - /.test(txtz), 'empty title: LI number and Requested label without a dangling separator');
+    ok(/LI42\.10-P-078779\/LI42\.10-P-078779_v1\.pdf/.test(txtz) && !/LI42\.10-P-078779 - /.test(txtz) && !/Requested/.test(txtz), 'empty title: LI number alone, without a dangling separator or a Requested label');
   }
   process.exit();
 })().catch(err => { console.error('ERROR', err); process.exit(1); });

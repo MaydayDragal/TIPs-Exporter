@@ -2,6 +2,22 @@
 
 TIPS Exporter keeps a local library of XENTRY TIPS LIs and attachments up to date. It runs inside your logged-in TIPS tab, checks recent index changes, and downloads only changed or missing files into their existing folders. New PDFs undergo required cleanup of `D7MASALL`, download/print stamps and metadata before saving. Older versions and attachments are preserved.
 
+**Contents:** [Install](#install) · [Shared index folder](#shared-index-folder) · [Saved documents folder](#saved-documents-folder-and-verification) · [LI Library layout](#li-library-layout) · [On the TIPS page](#on-the-tips-page-last-sync-and-refresh) · [What a sync requests](#what-a-sync-requests-from-tips) · [Attachments from earlier versions](#attachments-from-earlier-versions) · [Download LI documents](#download-li-documents) · [PDF scrubbing](#automatic-pdf-scrubbing) · [Bulk export](#advanced-bulk-export) · [Troubleshooting](#troubleshooting) · [For developers](#for-developers)
+
+**Version 1.21.0:** the documents folder can be the library that **LI Organizer** builds, and a sync asks TIPS for less.
+
+| Change | In short | Details |
+|---|---|---|
+| LI Library layout | Newest version in the document folder, earlier ones in **Older versions**, new documents in group folders. The previous version is moved down when a new one arrives. | [LI Library layout](#li-library-layout) |
+| Last-sync indicator | An entry in the Reader's grey bar shows when TIPS was last checked and what was found. | [On the TIPS page](#on-the-tips-page-last-sync-and-refresh) |
+| Page refresh | After a sync saves new or changed documents, the TIPS page reloads once. | [On the TIPS page](#on-the-tips-page-last-sync-and-refresh) |
+| Limit per sync | **Most documents to request in one sync**, 50 by default. | [What a sync requests](#what-a-sync-requests-from-tips) |
+| Fewer repeat requests | One attachment under several names counts as one; an attached PDF that cannot be cleaned is no longer retried on every sync. | [What a sync requests](#what-a-sync-requests-from-tips) |
+| No `(Requested)` label | New document folders and the folders inside ZIP downloads are named `LI number - Title`. Existing labelled folders are still recognised and are not renamed. | [What's inside each zip](#whats-inside-each-zip) |
+| Tests without Node | The folder-module tests can run in headless Chrome. | [For developers](#for-developers) |
+
+**Compatibility:** an index CSV written by 1.21.0 has no new columns and opens in 1.20.2 or later. The new settings (layout, limit, page refresh) are stored per browser, not in the index.
+
 **Version 1.20.4 (QA fixes):**
 - Saving an attachment from an earlier version could freeze the TIPS tab. This happened when its long filename clashed with a current attachment. The version tag is now kept and only the name before it is shortened.
 - With auto-approve and auto-continue on, an LI that always failed (for example, topic data returning HTTP 404) produced new batch ZIPs without end. Auto-continue now stops when a batch saves nothing.
@@ -34,7 +50,7 @@ TIPS Exporter keeps a local library of XENTRY TIPS LIs and attachments up to dat
 
 1. Download this repository with **Code → Download ZIP** and extract it to a permanent folder. Open the extracted repository folder that contains `manifest.json`.
 2. In Chrome, open `chrome://extensions` and switch on **Developer mode** (top right).
-3. Click **Load unpacked** and select the extracted folder that directly contains `manifest.json`. The extension card must show **1.20.4**.
+3. Click **Load unpacked** and select the extracted folder that directly contains `manifest.json`. The extension card must show **1.21.0**.
 4. Optional: pin the extension to the toolbar (puzzle icon, then the pin).
 
 Needs Chrome 111 or newer.
@@ -72,11 +88,11 @@ The inventory lists saved and missing PDF versions, empty/invalid PDFs, duplicat
 
 **Verification scope:** filenames, required versions from v1 through the indexed version, and a nonempty PDF header. This does not validate every PDF page. Attachment scans compare names and sizes; they do not hash contents or establish whether additional attachments exist online. Selected updates fetch the current attachment list and compare downloaded contents only when the document has an indexed version/date change, a missing required current PDF, missing tracked attachments, or a retryable/interrupted update. Repairing only an older PDF gap skips unchanged current attachments.
 
-**Index errors and exceptions:** the optional `document_exceptions` CSV column stores document-version errors with a reason and date. Confirmed unavailable versions (including version-PDF 404 responses) and PDFs rejected as encrypted, damaged, unsupported, or unreadable become exclusions for that exact version. They leave the routine download list and required coverage counts. A document with every expected version excluded leaves the required-document denominator only if it has no attachment expectations or retryable errors; PDF exceptions never hide missing attachments. The catalogue and bulk progress are retained. Network/session errors, attachment errors, write failures, and missing scrub-engine errors remain retryable and actionable. Each future folder update records new failures, refreshes retried errors, and clears resolved errors. Scan discrepancies such as duplicate folders remain in the inventory report.
+**Index errors and exceptions:** the optional `document_exceptions` CSV column stores document-version errors with a reason and date. Confirmed unavailable versions (including version-PDF 404 responses) and PDFs rejected as encrypted, damaged, unsupported, or unreadable become exclusions for that exact version. They leave the routine download list and required coverage counts. A document with every expected version excluded leaves the required-document denominator only if it has no attachment expectations or retryable errors; PDF exceptions never hide missing attachments. The catalogue and bulk progress are retained. Network/session errors, attachment download errors, write failures, and missing scrub-engine errors remain retryable and actionable. An attached PDF that is encrypted or unreadable is reported without making the document retryable. Each future folder update records new failures, refreshes retried errors, and clears resolved errors. Scan discrepancies such as duplicate folders remain in the inventory report.
 
 Existing unavailable-version history and recognized errors in the last saved folder-update summary migrate locally on upgrade. **Retry excluded versions** requests only the excluded PDF versions, with one topic-metadata request per selected document and no attachment downloads. It can create a missing document folder for a successful retry. Successful saves clear matching exceptions; unsuccessful retries refresh their date/reason. Retry-only success does not clear unrelated attachment errors or mark other pending changes complete. An invalid existing PDF is preserved and must be moved aside before a replacement can be saved. The exception list and exported inventory remain available for review. Older nine-column CSVs still import normally; use 1.17.0 or later to open extended logs.
 
-**Preserving files:** LI numbers identify existing folders even when titles have changed. A new `LI…_v5.pdf` goes beside v1–v4 in that same folder. Valid saved PDFs are skipped. Invalid existing PDFs are reported and preserved; move one aside manually and update again to replace it. A changed `photo.jpg` is added as `photo (v5).jpg`, then `photo (v5-2).jpg` if needed. Identical contents already saved under the original name or a version name are skipped. Removed upstream attachments and unrelated files stay. Duplicate LI folders and mixed container/topic locations are excluded from updates until you resolve the ambiguity. Loose PDFs never hide LI folders nested underneath.
+**Preserving files:** LI numbers identify existing folders even when titles have changed. A new `LI…_v5.pdf` goes beside v1–v4 in that same folder (with [LI Library layout](#li-library-layout) on, v5 stays in the folder and v4 moves to **Older versions**). Valid saved PDFs are skipped. Invalid existing PDFs are reported and preserved; move one aside manually and update again to replace it. A changed `photo.jpg` is added as `photo (v5).jpg`, then `photo (v5-2).jpg` if needed. Identical contents already saved under the original name or a version name are skipped. Removed upstream attachments and unrelated files stay. Duplicate LI folders and mixed container/topic locations are excluded from updates until you resolve the ambiguity. Loose PDFs never hide LI folders nested underneath.
 
 **Incremental updates:** manual and automatic updates use the same selection rules. The local scan and loaded index identify new versions, missing files, newer modification dates, and previous interrupted/failed updates. All other documents are skipped without TIPS requests. Selected documents use the indexed topic ID and version directly, with no separate per-document search. The progress counter counts only selected documents; the result reports how many unchanged documents were skipped. If nothing needs downloading, the repair action makes zero TIPS requests. **Sync now** still makes the recent index-search requests, but no per-document requests. An existing archive is compared with an offline index baseline, without an initial attachment-download sweep. The baseline persists across reloads and is separate from actual attachment verification. Scrub-rule changes alone do not select unchanged documents.
 
@@ -89,6 +105,86 @@ The schedule uses the [Chrome alarms API](https://developer.chrome.com/docs/exte
 **Scrubbing and interruptions:** new PDFs and PDF attachments receive required cleanup plus your additional scrub rules before saving. Existing PDFs are not rewritten when rules change. Stop waits for the current network request, cancels remaining work, and keeps completed files. A lost session, revoked access, or worker restart produces a retryable error. Restore your session or choose **Allow documents access**, then update again. The extension cleans its own uncommitted empty placeholders and skips completed files. Avoid editing the archive from another application or extension installation during an update; tab coordination only covers this installation.
 
 Folder handles persist across updates to the same installation. A new installation must select the index and documents folders again; portable exceptions and attachment expectations are restored from the index, and a local scan inventories new files. Scans support 8 nested container levels, 8 nested attachment levels, and 100,000 entries; choose a more specific archive folder if a limit is reached. Each downloaded file is limited to 512 MiB. Folder updates save PDFs and attachment files; optional metadata and links lists remain ZIP export features. If the index disk is temporarily unavailable, metadata stays in Chrome awaiting synchronization. Conflicting or stale index saves never discard unacknowledged exception records.
+
+## LI Library layout
+
+Use this when the documents folder is the library built by LI Organizer (for example `G:\LI Library`). Without it, that library is misread: each **Older versions** subfolder looks like a second copy of its document, and those documents are reported as duplicates and skipped.
+
+```
+LI Library/
+    54 Electrical and instruments/
+        LI54.71-P-080956 - 174 with MB.OS 2.1.1 OR Later - Driver Assistance System Limited/
+            LI54.71-P-080956_v8.pdf          newest version
+            Older versions/
+                LI54.71-P-080956_v1.pdf … _v7.pdf
+            Attachments and Links/
+                U142791 with Error ID 107.png
+```
+
+1. Open **Library → Folder settings → Choose documents folder…** and select the library folder itself (the one holding the group folders).
+2. **LI Library layout** is ticked automatically when group folders are found. Keep **Earlier-versions subfolder** at `Older versions` unless your library uses another name.
+3. Click **Use this documents folder**, then **Scan & verify** in Library.
+
+What automatic sync then does for each changed document:
+
+| Situation | Result |
+|---|---|
+| A new version (v9) appears in TIPS | `…_v9.pdf` is saved in the document folder; `…_v8.pdf` (and `…_v8.json`) move to **Older versions**. |
+| An earlier version is missing | It is downloaded and filed in **Older versions**. |
+| A version is already in **Older versions** | Skipped; nothing is downloaded. |
+| New or changed attachments | Saved in **Attachments and Links**; existing files are kept and a changed file gets a versioned name. |
+| A document that is not in the library yet | A folder `LI number - Title` is created in its group folder, which is created too if needed. |
+
+Moving is done as copy, check, then remove, so an interruption never loses a file: at worst an earlier version is still beside the newest one and is filed by the next update. If **Older versions** already holds a different file with the same name, both files are left where they are. An invalid PDF is never moved. Files whose names don't follow `LI…_vN.pdf` (for example `…_v7 (2).pdf`) are left alone.
+
+A library whose document folders sit directly in the selected folder, with no group folders, gets new documents there too.
+
+**Working with LI Organizer.** LI Organizer builds and tidies the library; the extension keeps it current. Both use the same folder names (`Older versions`, `Attachments and Links`, group folders such as `54 Electrical and instruments`), so running LI Organizer after a sync is safe: it finds the files already where it would put them.
+
+- LI Organizer keeps two different files with one name as `guide.pdf` and `guide (2).pdf`. A PDF attachment often exists twice this way: the original download and the copy this extension cleaned. The extension accepts either as the expected file (see [What a sync requests](#what-a-sync-requests-from-tips)).
+- After LI Organizer has merged or moved a lot of files, the index may expect files that are no longer there. Connect the library, run **Scan & verify**, and check the inventory before the first sync. Keep **Automatically sync** off until the scan shows nothing unexpected.
+- Group folder names come from a fixed list of main groups; a group without a known name is created as its number alone (`06`). An existing group folder is always used, whatever it is called after the number.
+
+## On the TIPS page: last sync and refresh
+
+**Last-sync indicator.** The Reader's grey bar under the header (the one with "No vehicle specified" on the left and the Reader version on the right) gets one more entry. It is a normal part of that bar, not an overlay, and is put back if the Reader redraws the bar. Click it to open the exporter.
+
+| It shows | When |
+|---|---|
+| `Last sync today 11:32 (4 min ago) · nothing new` | The last check of TIPS found no changes. |
+| `Last sync today 11:32 (4 min ago) · 2 new, 1 updated` | What the last check found. |
+| `… · automatic sync off` / `… · no library folder` | Automatic sync is unticked, or no documents folder is connected. |
+| `Checking TIPS for new documents…` / `Syncing library… 3/12` | A check or a folder update is running. |
+| `New documents saved · click to refresh this page now` | A page refresh is waiting for you (see below). |
+| `Sync paused · log in to TIPS again` | The session expired. |
+| `TIPS Exporter · not synced yet` | No check has run in this browser. |
+
+The time is that of the last check of TIPS (manual or automatic), shared by every open TIPS tab. A page without that bar shows no indicator.
+
+**Page refresh after new documents.** When a sync has saved new or changed documents, the TIPS page reloads once so the Reader's own lists show them.
+
+- It waits while you are typing in a field, have the exporter drawer, a version list or the **New in TIPS** dialog open, or a download, scan or check is running. It tries again every 15 seconds; meanwhile the indicator offers a manual refresh.
+- Each check causes at most one reload per tab, so a reload can never loop. Other open TIPS tabs reload once the tab that did the sync has finished.
+- If you are only reading a topic, the page still reloads. Untick **Library → Refresh the TIPS page after new documents are saved** to switch this off.
+
+## What a sync requests from TIPS
+
+A sync makes the recent-changes search (usually one request) and then requests only the documents selected below. Everything else is skipped without a request.
+
+| A document is selected when | Note |
+|---|---|
+| The index has a newer version or a newer modification date than the folder | Normal updates. |
+| A required version PDF is missing | Versions marked unavailable are not required. |
+| An attachment the index expects is missing | See "one attachment, several names" below. |
+| Its last update was interrupted or failed for a temporary reason | Network, session or write errors. |
+| It is indexed but has no folder, and **Download indexed documents missing from this folder** is on | |
+
+- **Most documents to request in one sync** (Library screen) is a ceiling for one manual or automatic run. It starts at **50**. The rest are left for the next sync, and the result says how many were held back. Set it to 0 for no limit.
+- **One attachment, several names.** `guide.pdf`, `guide (v5).pdf` (a changed file this extension saved) and `guide (2).pdf` (how Windows and LI Organizer name a second file called `guide.pdf`) are one family. If any of them has the size the index expects, the attachment is not missing, and identical contents are never saved under another name of the family. So a duplicate you clear away is not downloaded again.
+- **An attached PDF that cannot be cleaned** (encrypted or unreadable) is left out and listed in the result, but it no longer marks the document for retry on every sync. It is tried again when the document next changes. A missing PDF engine still counts as temporary.
+- **A document's own PDF that cannot be cleaned**, or a version TIPS no longer has, becomes an exclusion for that version, as before.
+
+**If a sync keeps selecting documents that have not changed,** the index and the folder disagree. Run **Scan & verify** and download the inventory CSV to see which files are reported missing. The index's `attachment_inventory` column lists the files it expects for each document; it only ever gains entries, so files removed or renamed outside the extension stay expected (within the name-family rule above).
 
 ## Attachments from earlier versions
 
@@ -184,7 +280,7 @@ Progress is tracked per document, so changing the batch size never skips or repe
   The exporter recognises an expired session whether TIPS answers with an error, redirects to the login page (also on another domain), or shows the login page instead of the document – and tells it apart from a network outage.
 - **Reloading the page keeps your work:** a batch waiting for approval and an interrupted download are stored in the browser (IndexedDB) and come back after a reload or a fresh login, ready to approve or resume. Only a download that is actively running is lost on reload (Chrome asks first).
 - **Zips stop at 400 MB,** because a zip is built in memory before it's saved. A bulk batch that reaches the limit is offered for review with what it has; the rest stay pending for the next batch. A single-LI download lists what didn't fit, and **Fix** puts those back in the box.
-- **Folder and file names are shortened** (topic titles to 45 characters plus the LI number and `(Requested)` label, attachment names to 60, keeping the extension) so that unzipped paths stay well under Windows' 260-character limit.
+- **Folder and file names are shortened** (topic titles to 45 characters plus the LI number, attachment names to 60, keeping the extension) so that unzipped paths stay well under Windows' 260-character limit.
 
 ## Request pacing
 
@@ -196,7 +292,7 @@ Progress is tracked per document, so changing the batch size never skips or repe
 The default single-topic ZIP matches this example:
 
 ```
-LI00.00-P-066047 - Odor like crayon or vinegar entering the pass (Requested)/
+LI00.00-P-066047 - Odor like crayon or vinegar entering the pass/
     Attachments and Links/
         workshop instruction_EN.pdf
     LI00.00-P-066047_v1.pdf
@@ -241,7 +337,10 @@ After updating, reload the extension and the TIPS tab, then check:
 8. Select an index folder in Settings. Approve a batch and verify its CSV updates; reload TIPS and confirm the same progress loads. Settings and recent downloads stay in Chrome.
 9. **⚙ → PDF scrubbing** shows required cleanup. Download a topic and open its PDF: the configured user ID and separate print timestamp should be gone, body content should remain, and the export summary should report PDFs scrubbed. Check prior versions and a PDF attachment too.
 
-10. Select a documents folder containing a saved LI with v1–v4. Scan it against an index listing v5: the report should show v5 missing. Update it, then confirm v5 appears beside v1–v4 and older attachments remain. Run again to confirm identical attachments are skipped. Download the inventory CSV.
+10. The grey bar under the header shows **Last sync …**; clicking it opens the drawer. With **Refresh the TIPS page after new documents are saved** ticked, a sync that saves something reloads the page once, and not while you are typing.
+11. Choose a library built by LI Organizer as the documents folder: **LI Library layout** ticks itself, **Scan & verify** reports no duplicate documents, and a document with a newer indexed version ends up with the new PDF in its folder and the previous one in **Older versions**.
+12. Set **Most documents to request in one sync** to 1 with two documents needing an update: one is processed and the result says one was left for the next sync.
+13. Select a documents folder containing a saved LI with v1–v4. Scan it against an index listing v5: the report should show v5 missing. Update it, then confirm v5 appears beside v1–v4 and older attachments remain. Run again to confirm identical attachments are skipped. Download the inventory CSV.
 
 ## For developers
 
@@ -250,6 +349,12 @@ The extension needs no build step: load the repository folder with **Load unpack
 ```
 npm install
 npm test
+```
+
+On a PC without Node.js, the folder-module tests (`documents-folder`, `document-exceptions`, `library-layout`) can be run in headless Chrome instead. The tests that simulate the TIPS Reader still need `npm test`.
+
+```
+powershell -ExecutionPolicy Bypass -File tests\browser\run-in-chrome.ps1
 ```
 
 `vendor/pdf-lib.min.js` is the bundled, unmodified pdf-lib 1.17.1 UMD distribution; its MIT license is in `vendor/pdf-lib.LICENSE.md`. `pdf-scrubber.js` is adapted from the provided LI PDF Scrub HTML. The new PDF tests use real generated PDFs and inspect the PDFs extracted from the exported ZIPs. Endpoint simulation tests also use real PDF fixtures, so required cleanup is exercised without contacting TIPS. Library tests cover startup pause, incremental requests, old-setting migration, folder preservation, missing-folder preferences, interval settings, alarm recovery, multiple tabs, busy-run overlap and session expiry.

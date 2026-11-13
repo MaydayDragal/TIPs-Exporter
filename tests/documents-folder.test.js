@@ -91,7 +91,7 @@ async function test(name, fn) { try { await fn(); console.log('PASS ' + name); }
   await test('missing LI folders are planned only when explicitly included', async () => {
     const e = env(), d = directory(); await e.repo.connect(d);
     assert.equal((await e.repo.start('a', 1, SNAP, {})).topics.length, 0); await e.repo.end('a', 1, {});
-    const r = await e.repo.start('b', 1, SNAP, { includeMissing: true }); assert.equal(r.topics.length, 1); assert.equal(r.topics[0].create, true); assert.match(r.topics[0].path, /^LI00.00-P-066047 - New title \(Requested\)$/);
+    const r = await e.repo.start('b', 1, SNAP, { includeMissing: true }); assert.equal(r.topics.length, 1); assert.equal(r.topics[0].create, true); assert.match(r.topics[0].path, /^LI00.00-P-066047 - New title$/);
     assert.deepEqual(SNAP.done, { 101: { b: 1, d: '2026-10-07', v: 5 } });
   });
   await test('duplicate LI folders are excluded from updates', async () => {

@@ -116,7 +116,7 @@ async function update(c, e) { c.$('doc_update').click(); await until(() => e.mes
     try {
       await update(c, e); assert.equal(d.children.size, 0); e.messages.length = 0;
       c.$('doc_missing').checked = true; c.$('doc_missing').dispatchEvent(new c.w.Event('change')); await update(c, e);
-      const base = `${LI} - New title (Requested)`;
+      const base = `${LI} - New title`;
       for (let v = 1; v <= 5; v++) await assertSavedPdf(d, `${base}/${LI}_v${v}.pdf`, v);
       assert.equal(await d.read(`${base}/Attachments and Links/photo.jpg`), 'new photo'); assert.equal(e.state.done[101].v, 5);
     } finally { c.close(); }

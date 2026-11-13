@@ -7,14 +7,18 @@
     $('choose-documents').disabled = working || typeof window.showDirectoryPicker !== 'function';
     $('use-documents').disabled = working || !selected;
     for (const id of ['save-documents', 'allow-documents', 'disconnect-documents']) $(id).disabled = working || !current;
-    $('documents-attachments').disabled = $('documents-auto').disabled = $('documents-poll-minutes').disabled = working;
+    $('documents-attachments').disabled = $('documents-auto').disabled = $('documents-poll-minutes').disabled = $('documents-library').disabled = working;
+    $('documents-older').disabled = working || !$('documents-library').checked;
   }
   async function refresh() {
     current = await TIPSFolderDB.get('documentsConnection') || null;
     const r = await send('status'), s = r?.status;
     $('documents-location').textContent = current ? current.handle.name : 'No documents folder selected';
     $('documents-status').textContent = s?.message || 'Choose the parent containing your saved document folders (LI/GI).';
-    if (current && !selected && !edited) { $('documents-attachments').value = current.attachmentFolder; $('documents-auto').checked = current.auto; $('documents-poll-minutes').value = current.pollMinutes ?? 10; }
+    if (current && !selected && !edited) {
+      $('documents-attachments').value = current.attachmentFolder; $('documents-auto').checked = current.auto; $('documents-poll-minutes').value = current.pollMinutes ?? 10;
+      $('documents-library').checked = !!current.olderFolder; if (current.olderFolder) $('documents-older').value = current.olderFolder;
+    }
     controls();
   }
   async function act(fn) {
@@ -27,11 +31,17 @@
   const config = () => {
     const pollMinutes = +$('documents-poll-minutes').value;
     if (!Number.isInteger(pollMinutes) || pollMinutes < 1 || pollMinutes > 1440) throw Error('Sync interval must be a whole number from 1 to 1440 minutes.');
-    return { attachmentFolder: $('documents-attachments').value, auto: $('documents-auto').checked, pollMinutes };
+    const olderFolder = $('documents-library').checked ? $('documents-older').value.trim() || 'Older versions' : '';
+    return { attachmentFolder: $('documents-attachments').value, olderFolder, auto: $('documents-auto').checked, pollMinutes };
   };
   $('choose-documents').onclick = () => act(async () => {
     selected = await window.showDirectoryPicker({ id: 'tips-documents-folder', mode: 'readwrite' });
-    $('selected-documents').textContent = selected.name; note('Choose Use this documents folder to connect it.');
+    $('selected-documents').textContent = selected.name;
+    // A folder with group folders such as "54 Electrical and instruments" is an LI Library: offer its layout.
+    let library = false;
+    try { for await (const x of selected.values()) if (x.kind === 'directory' && /^\d{2}(?: |$)/.test(x.name)) { library = true; break; } } catch (_) {}
+    if (library) { $('documents-library').checked = true; controls(); }
+    note(library ? 'This looks like an LI Library, so LI Library layout was switched on. Choose Use this documents folder to connect it.' : 'Choose Use this documents folder to connect it.');
   });
   $('use-documents').onclick = () => act(async () => {
     const options = config(), token = crypto.randomUUID(); await TIPSFolderDB.put('documents-candidate:' + token, { handle: selected });
@@ -44,7 +54,7 @@
     return send('inventory');
   });
   $('disconnect-documents').onclick = () => act(() => send('disconnect'));
-  for (const id of ['documents-attachments', 'documents-auto', 'documents-poll-minutes']) for (const type of ['input', 'change']) $(id).addEventListener(type, () => { edited = true; });
+  for (const id of ['documents-attachments', 'documents-auto', 'documents-poll-minutes', 'documents-library', 'documents-older']) for (const type of ['input', 'change']) $(id).addEventListener(type, () => { edited = true; controls(); });
   if (chrome.storage.onChanged) chrome.storage.onChanged.addListener((c, area) => { if (area === 'local' && c.documentsFolder && !working) refresh().catch(e => note(e.message, true)); });
   refresh().catch(e => note(e.message, true));
 })();

@@ -10,7 +10,7 @@ const L = require('../vendor/pdf-lib.min.js');
 async function pdfText(bytes) { const d=await L.PDFDocument.load(bytes); return d.context.enumerateIndirectObjects().filter(([,o])=>o instanceof L.PDFRawStream).map(([,o])=>Buffer.from(L.decodePDFRawStream(o).decode()).toString('latin1')).join('\n'); }
 const code = fs.readFileSync(path.join(__dirname, '..', 'content.js'), 'utf8');
 const ITEM = { tips: 'LI00.00-P-066047', tipsId: 101, version: 7, title: 'Odor like crayon or vinegar entering the passenger compartment' };
-const BASE = 'LI00.00-P-066047 - Odor like crayon or vinegar entering the pass (Requested)';
+const BASE = 'LI00.00-P-066047 - Odor like crayon or vinegar entering the pass';
 const ALL = { docJson: true, histCsv: true, histJson: true, attCsv: true, manifest: true };
 const tick = ms => new Promise(r => setTimeout(r, ms));
 async function until(fn) { const end = Date.now() + 6000; while (!fn()) { if (Date.now() > end) throw Error('Timed out'); await tick(10); } }

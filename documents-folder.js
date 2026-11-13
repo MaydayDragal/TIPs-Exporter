@@ -8,6 +8,16 @@
   // Match the normal Reader exporter's FULL_NO format, including GI as well as LI.
   const DOCUMENT_NO = /^[A-Z]{2}\d{2}\.\d{2}-[A-Z]-\d{6}$/i, PREFIX = /^([A-Z]{2}\d{2}\.\d{2}-[A-Z]-\d{6})(?=$|[\s_(.-])/i;
   const PDF = /^([A-Z]{2}\d{2}\.\d{2}-[A-Z]-\d{6})_v([1-9]\d*)\.pdf$/i;
+  // LI Library layout: the newest version sits in the document folder, earlier ones (and their details files) in a subfolder.
+  const VERSIONED = /^([A-Z]{2}\d{2}\.\d{2}-[A-Z]-\d{6})_v([1-9]\d*)\.(pdf|json)$/i;
+  // Main groups of the document numbering, used to name the group folder of a new document (same list as LI Organizer).
+  const GROUPS = { '00': 'Overall vehicle', '01': 'Engine', '03': 'Crank assembly', '05': 'Engine timing', '07': 'Mixture formation', '09': 'Air intake and charging',
+    '13': 'Belt drive', '14': 'Intake and exhaust manifolds', '15': 'Engine electrical', '18': 'Engine lubrication', '20': 'Engine cooling', '22': 'Engine mounts',
+    '25': 'Clutch', '26': 'Manual transmission', '27': 'Automatic transmission', '28': 'Transfer case', '29': 'Pedals', '30': 'Throttle control', '31': 'Frame and towing',
+    '32': 'Suspension', '33': 'Front axle', '35': 'Rear axle', '40': 'Wheels and tires', '41': 'Propeller shaft', '42': 'Brakes', '46': 'Steering', '47': 'Fuel system',
+    '49': 'Exhaust system', '54': 'Electrical and instruments', '58': 'Tools and diagnosis', '60': 'Body', '61': 'Underbody', '62': 'Front end', '63': 'Side panels',
+    '64': 'Rear end', '65': 'Roof', '67': 'Windows', '68': 'Interior trim', '72': 'Doors', '77': 'Sunroof and soft top', '80': 'Locking system', '82': 'Body electrical',
+    '83': 'Climate control', '88': 'Exterior body parts', '91': 'Seats and restraints', '98': 'Paint' };
   const KEY = 'documentsConnection', RUN = 'documentsRun', STATUS = 'documentsStatus', CHUNK = 262144;
   const validMinutes = value => Number.isInteger(value) && value >= 1 && value <= 1440;
   function pollMinutes(value = 10) { if (!validMinutes(value)) throw Error('Sync interval must be a whole number from 1 to 1440 minutes.'); return value; }
@@ -19,8 +29,24 @@
   }
   function topicFolder(x) {
     const title = Client.portableName(Client.portableName(x.title, '').slice(0, 45), '');
-    return `${x.tips.toUpperCase()}${title ? ' - ' + title : ''} (Requested)`;
+    return `${x.tips.toUpperCase()}${title ? ' - ' + title : ''}`;   // no "(Requested)" label since 1.21.0
   }
+  // "LI54.71-P-080956 - Title", the way LI Organizer names a document folder (no "(Requested)", title up to 90 letters).
+  function libraryFolder(x) {
+    let title = Client.portableName(x.title, '').slice(0, 90);
+    if (title.length === 90 && title.lastIndexOf(' ') > 60) title = title.slice(0, title.lastIndexOf(' '));
+    title = Client.portableName(title.replace(/[ .\-_,]+$/, ''), '');
+    return `${x.tips.toUpperCase()}${title ? ' - ' + title : ''}`;
+  }
+  // The group folder for a document number: one that already exists ("54 Electrical and instruments" or just "54"), else a new one.
+  function groupFolder(tips, rootFolders = []) {
+    const g = String(tips).slice(2, 4), have = rootFolders.filter(n => n === g || n.startsWith(g + ' ')).sort()[0];
+    return have || (GROUPS[g] ? `${g} ${GROUPS[g]}` : g);
+  }
+  // One attachment can sit under several names: "photo.jpg", "photo (v5).jpg" (a changed file this extension saved) and
+  // "photo (2).jpg" (how Windows and LI Organizer name a second file called photo.jpg). They are one family. When any
+  // of them has the size the index expects, the expected attachment is there; it is not missing.
+  const familyOf = path => { const s = String(path).toLowerCase(), slash = s.lastIndexOf('/'), dot = s.lastIndexOf('.'), cut = dot > slash + 1 ? dot : s.length; return s.slice(0, cut).replace(/ \((?:v\d+(?:-\d+)?|\d{1,3})\)$/, '') + s.slice(cut); };
   const digest = async bytes => Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)), b => b.toString(16).padStart(2, '0')).join('');
   async function validPdf(file) { return file.size > 0 && new TextDecoder().decode(await file.slice(0, 1024).arrayBuffer()).includes('%PDF-'); }
   async function entry(dir, name, kind, create = false) {
@@ -35,7 +61,7 @@
     let tail = Promise.resolve(); const uploads = new Map();
     async function emit(r, phase = 'ready', message = '', extra = {}) {
       const s = r ? { configured: true, folderName: r.handle.name, epoch: r.epoch, attachmentFolder: r.attachmentFolder, auto: r.auto,
-        pollMinutes: r.pollMinutes ?? 10, phase, message: message || 'Documents folder connected.', ...extra } : { configured: false, phase: 'disconnected', auto: false, message: 'Choose the parent folder containing your saved document folders (LI/GI).' };
+        pollMinutes: r.pollMinutes ?? 10, olderFolder: r.olderFolder || '', phase, message: message || 'Documents folder connected.', ...extra } : { configured: false, phase: 'disconnected', auto: false, message: 'Choose the parent folder containing your saved document folders (LI/GI).' };
       await db.put(STATUS, s); await writeStatus(s); return s;
     }
     const queue = fn => { const p = tail.then(fn).catch(async e => { try { await emit(await db.get(KEY), /permission|access|NotAllowed/i.test(e.message || e.name) ? 'permission' : 'error', e.message); } catch (_) {} throw e; }); tail = p.catch(() => {}); return p; };
@@ -129,7 +155,7 @@
     async function scan(r, snapshot = {}) {
       snapshot = await exceptionSnapshot(r, snapshot);
       const indexByNumber = new Map((snapshot.index || []).map(x => [String(x.tips).toUpperCase(), x]));
-      const found = new Map(), issues = []; let visited = 0;
+      const found = new Map(), issues = []; let visited = 0, rootFolders = [];
       async function walk(d, path, depth) {
         const list = []; for await (const x of d.values()) { if (++visited > 100000) throw Error('Folder scan exceeded 100,000 entries. Choose a more specific archive folder.'); list.push(x); }
         const hinted = PREFIX.exec(d.name)?.[1]?.toUpperCase();
@@ -137,7 +163,10 @@
         const tips = hinted || (pdfIds.length === 1 ? pdfIds[0] : null); let topic = null;
         if (tips && path) {
           const versions = [], invalid = [], notes = [], attachments = [], attachmentHandle = await entry(d, r.attachmentFolder, 'directory');
-          for (const f of list) if (f.kind === 'file') {
+          // LI Library layout: PDFs in the earlier-versions subfolder are versions of this document, not a second folder.
+          const earlier = [], olderHandle = r.olderFolder ? await entry(d, r.olderFolder, 'directory') : null;
+          if (olderHandle) for await (const f of olderHandle.values()) { if (++visited > 100000) throw Error('Folder scan exceeded 100,000 entries.'); earlier.push(f); }
+          for (const f of [...list, ...earlier]) if (f.kind === 'file') {
             const m = PDF.exec(f.name); if (!m) continue;
             if (m[1].toUpperCase() !== tips) { notes.push(`Unexpected document PDF: ${f.name}`); continue; }
             const version = +m[2]; if (version > 10000) { notes.push(`Invalid PDF version: ${f.name}`); continue; }
@@ -155,14 +184,16 @@
           if (attachmentHandle) await attachmentsIn(attachmentHandle, r.attachmentFolder);
           const last = r.progress?.[tips] || null;
           const expected = expectedAttachments(r, tips, indexByNumber.get(tips));
-          const missingAttachments = [...new Set(expected.filter(f => !attachments.some(a => a.path.toLowerCase() === f.path.toLowerCase() && a.size === f.size)).map(f => f.path))];
+          const missingAttachments = [...new Set(expected.filter(f => !attachments.some(a => a.size === f.size && (a.path.toLowerCase() === f.path.toLowerCase() || familyOf(a.path) === familyOf(f.path)))).map(f => f.path))];
           topic = { tips, path, versions: [...new Set(versions)].sort((a,b) => a-b), invalid: [...new Set(invalid)].sort((a,b) => a-b), attachments: attachments.length, attachmentFiles: attachments, missingAttachments, notes, last, baseline: r.baseline?.[tips] || null };
           if (!found.has(tips)) found.set(tips, []); found.get(tips).push(topic);
         }
         if (!path && tips && pdfIds.length) throw Error('Select the parent containing the document folders, not an individual document folder.');
         if (!topic && pdfIds.length) issues.push(`Versioned PDFs outside a unique document folder: ${path || '(selected folder)'}`);
         let nested = 0;
-        for (const child of list) if (child.kind === 'directory' && !child.name.startsWith('.') && !(topic && child.name.toLowerCase() === r.attachmentFolder.toLowerCase())) {
+        if (!path) rootFolders = list.filter(x => x.kind === 'directory').map(x => x.name);
+        for (const child of list) if (child.kind === 'directory' && !child.name.startsWith('.') && !(topic && child.name.toLowerCase() === r.attachmentFolder.toLowerCase())
+          && !(topic && r.olderFolder && child.name.toLowerCase() === r.olderFolder.toLowerCase())) {
           if (depth >= 8) throw Error('Folder scan exceeded 8 nested levels. Choose a more specific archive folder.');
           nested += await walk(child, path ? path + '/' + child.name : child.name, depth + 1);
         }
@@ -207,21 +238,60 @@
         if (matches.length === 1 && matches[0].ambiguous) summary.ambiguousTopics++;
         rows.push({ tips, title: '', indexedVersion: null, indexStatus: 'not in index', folderStatus: matches.length > 1 ? 'duplicate' : matches[0].ambiguous ? 'ambiguous' : 'not in index', path: matches.map(f => f.path).join(' | '), versions: matches[0].versions, missing: [], invalid: matches[0].invalid, attachments: matches[0].attachments, missingAttachments: matches[0].missingAttachments, notes: matches[0].notes });
       }
-      return { rows, summary, issues, at, exceptions, exceptionEvents: snapshot.exceptionEvents, attachmentUpdates, topics: [...found.values()].filter(a => a.length === 1 && !a[0].ambiguous).map(a => a[0]),
+      // New documents go into group folders unless this archive keeps its document folders directly in the selected folder.
+      const grouped = rootFolders.some(n => /^\d{2}(?: |$)/.test(n)) || ![...found.values()].some(a => a.some(t => !t.path.includes('/')));
+      return { rows, summary, issues, at, exceptions, exceptionEvents: snapshot.exceptionEvents, attachmentUpdates, rootFolders, grouped, topics: [...found.values()].filter(a => a.length === 1 && !a[0].ambiguous).map(a => a[0]),
         attachmentNote: 'Attachment paths, sizes and modification times are inventoried locally into the index log. Missing or size-changed indexed files remain actionable. This scan makes no TIPS requests and does not verify online attachment completeness or file contents.' };
+    }
+    // LI Library layout: once a newer version is in the document folder, the earlier PDFs (and details files) beside it
+    // are filed in the earlier-versions subfolder. A file is copied, the copy is checked, and only then is the original
+    // removed. Two different files with one name are both left where they are.
+    async function fileEarlier(r, topic) {
+      if (!r.olderFolder) return 0;
+      let d; try { d = await subdir(r.handle, topic.path); } catch (_) { return 0; }
+      let older = await entry(d, r.olderFolder, 'directory');
+      const here = [], known = [];
+      for await (const f of d.values()) if (f.kind === 'file') { const m = VERSIONED.exec(f.name); if (m && m[1].toUpperCase() === topic.tips) here.push({ f, version: +m[2], pdf: m[3].toLowerCase() === 'pdf' }); }
+      if (older) for await (const f of older.values()) if (f.kind === 'file') { const m = PDF.exec(f.name); if (m && m[1].toUpperCase() === topic.tips) known.push(+m[2]); }
+      const newest = Math.max(0, ...here.filter(x => x.pdf).map(x => x.version), ...known);
+      let moved = 0;
+      for (const x of here) {
+        if (x.version >= newest) continue;
+        const file = await x.f.getFile();
+        if (x.pdf && !await validPdf(file)) continue;   // an invalid PDF stays where it is, to be dealt with by hand
+        const bytes = await file.arrayBuffer(), sum = await digest(bytes);
+        older ||= await entry(d, r.olderFolder, 'directory', true);
+        const existing = await entry(older, x.f.name, 'file');
+        if (existing) {
+          const old = await existing.getFile(), same = old.size === file.size && await digest(await old.arrayBuffer()) === sum;
+          if (same) { await d.removeEntry(x.f.name); moved++; continue; }
+          if (old.size && (!x.pdf || await validPdf(old))) continue;   // a different file already has this name: keep both
+        }
+        const handle = existing || await entry(older, x.f.name, 'file', true), stream = await handle.createWritable();
+        try { await stream.write(new Uint8Array(bytes)); await stream.close(); } catch (e) { try { await stream.abort(); } catch (_) {} throw e; }
+        const copy = await handle.getFile();
+        if (copy.size !== file.size || await digest(await copy.arrayBuffer()) !== sum) throw Error(`${x.f.name}: the copy in ${r.olderFolder} did not match; the original was kept.`);
+        await d.removeEntry(x.f.name); moved++;
+      }
+      return moved;
     }
     async function remember(run, tips, item) { run.fileRecords ||= {}; const a = run.fileRecords[tips] ||= []; const old = a.findIndex(x => x.name.toLowerCase() === item.name.toLowerCase()); if (old >= 0) a.splice(old, 1); a.push(item); await db.put(RUN, run); }
     return {
       connect: (handle, options = {}) => queue(async () => {
         const attachmentFolder = leaf(options.attachmentFolder || 'Attachments and Links');
         if (await db.get(RUN)) throw Error('A folder update is running. Stop it before changing folders.');
-        const r = { handle, attachmentFolder, auto: options.auto !== false, pollMinutes: pollMinutes(options.pollMinutes), epoch: crypto.randomUUID(), progress: {} };
+        const olderFolder = options.olderFolder ? leaf(options.olderFolder) : '';
+        if (olderFolder.toLowerCase() === attachmentFolder.toLowerCase()) throw Error('The earlier-versions folder and the attachment folder need different names.');
+        const r = { handle, attachmentFolder, olderFolder, auto: options.auto !== false, pollMinutes: pollMinutes(options.pollMinutes), epoch: crypto.randomUUID(), progress: {} };
         await access(r); await db.put(KEY, r); return emit(r);
       }),
       configure: options => queue(async () => {
         if (await db.get(RUN)) throw Error('A folder update is running. Stop it before changing folder settings.');
         const r = await current(), interval = pollMinutes(options.pollMinutes ?? r.pollMinutes);
-        r.attachmentFolder = leaf(options.attachmentFolder || r.attachmentFolder); r.auto = options.auto !== false; r.pollMinutes = interval; await db.put(KEY, r); return emit(r);
+        const attachmentFolder = leaf(options.attachmentFolder || r.attachmentFolder);
+        const olderFolder = options.olderFolder === undefined ? r.olderFolder || '' : options.olderFolder ? leaf(options.olderFolder) : '';
+        if (olderFolder.toLowerCase() === attachmentFolder.toLowerCase()) throw Error('The earlier-versions folder and the attachment folder need different names.');
+        r.attachmentFolder = attachmentFolder; r.olderFolder = olderFolder; r.auto = options.auto !== false; r.pollMinutes = interval; await db.put(KEY, r); return emit(r);
       }),
       setAuto: auto => typeof auto !== 'boolean' ? Promise.reject(Error('Invalid automatic sync setting.')) : queue(async () => {
         const r = await db.get(KEY); if (!r) throw Error('Choose a documents folder first.');
@@ -251,7 +321,7 @@
         const inventory = await scan(r, snapshot), topics = inventory.topics.map(t => ({ ...t, create: false }));
         if (options.includeMissing) for (const x of snapshot.index || []) {
           const row = inventory.rows.find(a => a.tips === x.tips.toUpperCase());
-          if (row?.folderStatus === 'missing' || options.retryExceptions && row?.folderStatus === 'excluded' && !row.path) topics.push({ tips: x.tips.toUpperCase(), path: topicFolder(x), versions: [], invalid: [], missingAttachments: [], notes: [], create: true, last: null });
+          if (row?.folderStatus === 'missing' || options.retryExceptions && row?.folderStatus === 'excluded' && !row.path) topics.push({ tips: x.tips.toUpperCase(), path: r.olderFolder ? (inventory.grouped ? groupFolder(x.tips.toUpperCase(), inventory.rootFolders) + '/' : '') + libraryFolder(x) : topicFolder(x), versions: [], invalid: [], missingAttachments: [], notes: [], create: true, last: null });
         }
         const byNumber = new Map((snapshot.index || []).map(x => [x.tips.toUpperCase(), x]));
         for (const t of topics) t.tipsId = byNumber.get(t.tips)?.tipsId;
@@ -268,13 +338,14 @@
         let name = leaf(isPdf ? parts.at(-1) : Client.portableName(parts.at(-1), 'attachment')), d = await subdir(r.handle, topic.path, topic.create), relative = '';
         if (!isPdf) { d = await entry(d, r.attachmentFolder, 'directory', true); relative = r.attachmentFolder + '/'; }
         if (isPdf) {
-          const existing = await entry(d, name, 'file');
+          let existing = await entry(d, name, 'file');
+          if (!existing && r.olderFolder) { const older = await entry(d, r.olderFolder, 'directory'); if (older) existing = await entry(older, name, 'file'); }
           if (existing) { if (!await validPdf(await existing.getFile())) throw Error(`${name}: existing PDF is empty or invalid; it was preserved. Move it aside to download a replacement.`); return { skip: true, path: existing.name, kind: 'pdf' }; }
         } else {
           const dot = name.lastIndexOf('.'), stem = dot > 0 ? name.slice(0, dot) : name, ext = dot > 0 ? name.slice(dot) : '';
           // "photo (v5).jpg" belongs to the same family as "photo.jpg", whichever name arrives.
           const familyStem = stem.replace(/ \(v[0-9]+(?:-[0-9]+)?\)$/i, '') || stem;
-          const family = new RegExp('^' + esc(familyStem) + '(?: \\(v[0-9]+(?:-[0-9]+)?\\))?' + esc(ext) + '$', 'i');
+          const family = new RegExp('^' + esc(familyStem) + '(?: \\((?:v[0-9]+(?:-[0-9]+)?|[0-9]{1,3})\\))?' + esc(ext) + '$', 'i');
           // Older ZIP-extracted copies may carry characters Chrome would not create (e.g. '~'); compare their portable form.
           for await (const f of d.values()) if (f.kind === 'file' && (family.test(f.name) || family.test(Client.portableName(f.name)))) {
             const old = await f.getFile();
@@ -333,7 +404,14 @@
           const e = CSV.normalizeExceptions([{ version: +result.version, kind: 'retryable', reason: String(result.failure).replace(/[\x00-\x1f]/g, ' ').slice(0, 1000), at: now() }])[0];
           exceptionEvent(r, topic, 'exclude', e.version, e);
         } else if (result.ok && !result.retryOnly) exceptionEvent(r, topic, 'resolve-retryable', +result.version);
-        await db.put(KEY, r); return { saved: true, exceptionEvents: r.pendingExceptions || [] };
+        await db.put(KEY, r);
+        let filed = 0;
+        if (r.olderFolder) {
+          // Never fails the document: anything left beside the newest version is filed by the next update (or by LI Organizer).
+          try { if (await r.handle.queryPermission({ mode: 'readwrite' }) === 'granted') filed = await fileEarlier(r, topic); }
+          catch (e) { console.warn('TIPS Exporter: filing earlier versions of ' + topic.tips, e.message); }
+        }
+        return { saved: true, exceptionEvents: r.pendingExceptions || [], filed };
       }),
       end: (token, owner, summary = {}) => queue(async () => {
         // Ending a lease must remain possible after filesystem permission is revoked.
@@ -347,5 +425,5 @@
       reportError: error => queue(async () => emit(await db.get(KEY), /access|permission|NotAllowed/i.test(String(error)) ? 'permission' : 'error', String(error)))
     };
   }
-  return { create, CHUNK, leaf, topicFolder };
+  return { create, CHUNK, leaf, topicFolder, libraryFolder, groupFolder };
 });

@@ -42,7 +42,7 @@ async function runSync(c,e) { e.messages.length=0; c.$('library_sync').click(); 
       if(u.includes('/file/topics/'))return h.binary(original);
       if(u.includes('/topics/102/'))return h.json({version:1,attachments:[],references:[],history:{children:[]}});
     },{section:"library"});
-    try { assert(c.$('library_sync')); await runSync(c,e); assert(await e.d.read(`${other} - New title (Requested)/${other}_v1.pdf`)); assert.equal(JSON.stringify(e.state.done),before); }
+    try { assert(c.$('library_sync')); await runSync(c,e); assert(await e.d.read(`${other} - New title/${other}_v1.pdf`)); assert.equal(JSON.stringify(e.state.done),before); }
     finally { c.close(); }
   });
   await test('automatic library sync uses one switch even when legacy bulk auto-check was disabled',async()=>{
@@ -79,7 +79,7 @@ async function runSync(c,e) { e.messages.length=0; c.$('library_sync').click(); 
       c.$('doc_missing').checked=true; c.$('doc_missing').dispatchEvent(new c.w.Event('change'));
       c.$('doc_scan').click(); await until(()=>c.$('doc_report')); assert.deepEqual(c.requests,[]);
       await runSync(c,e); assert(!c.requests.some(u=>u.includes('/topics/102/')));
-      await assert.rejects(e.d.read(`${other} - New title (Requested)/${other}_v1.pdf`),/NotFound/);
+      await assert.rejects(e.d.read(`${other} - New title/${other}_v1.pdf`),/NotFound/);
       assert.equal(c.requests.filter(u=>u.includes('/search')).length,1);
     } finally { c.close(); }
   });
@@ -92,7 +92,7 @@ async function runSync(c,e) { e.messages.length=0; c.$('library_sync').click(); 
     },{startAuto:true,section:'library'});
     try {
       await until(()=>e.messages.some(x=>x.action==='end')); await until(()=>!c.$('library_sync').disabled);
-      assert(await e.d.read(`${other} - New title (Requested)/${other}_v1.pdf`));
+      assert(await e.d.read(`${other} - New title/${other}_v1.pdf`));
       assert(!c.requests.some(u=>u.includes('/topics/101/')),'known exclusions are not polled');
     } finally { c.close(); }
   });

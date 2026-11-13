@@ -34,7 +34,7 @@
     resume: null,       // a download interrupted by a lost session: {title, kind, remaining, carry, finish}
     latest: {},         // newest versions seen by "Check for updates": tips -> version
     settings: { outlet: '', user: '', ver: '', batchSize: 25, delayMs: 2000, delayMaxMs: 5000, pageSize: 50, pageSizeSrc: 'default',
-      autoApprove: false, autoContinue: true, autoCheck: true, libraryIncludeMissing: true, priorAttachments: true, outputLayout: OUTPUT_LAYOUT,
+      autoApprove: false, autoContinue: true, autoCheck: true, libraryIncludeMissing: true, libraryMaxDocuments: 50, autoRefreshPage: true, priorAttachments: true, outputLayout: OUTPUT_LAYOUT,
       pdfScrub: { enabled: true, user: true, timestamp: true, strings: 'D7MASALL' },
       files: { docJson: false, attCsv: false, histCsv: false, histJson: false, manifest: false } },
     run: null,          // {n, i, total, label, paused, cancel}
@@ -559,8 +559,11 @@
       started = true; await acceptDocumentInventory(planned.inventory);
       const indexed = new Map(S.index.map(x => [x.tips.toUpperCase(), x]));
       const eligible = planned.topics.filter(t => indexed.has(t.tips));
-      const topics = eligible.filter(t => priorAttachments ? client.needsPriorAttachments(t, indexed.get(t.tips)) : retryExceptions ? client.excludedVersions(indexed.get(t.tips)).some(v => v <= +indexed.get(t.tips).version) : client.needsUpdate(t, indexed.get(t.tips)));
-      summary.skippedTopics = eligible.length - topics.length;
+      const wanted = eligible.filter(t => priorAttachments ? client.needsPriorAttachments(t, indexed.get(t.tips)) : retryExceptions ? client.excludedVersions(indexed.get(t.tips)).some(v => v <= +indexed.get(t.tips).version) : client.needsUpdate(t, indexed.get(t.tips)));
+      // Optional ceiling on how many documents one run may request from TIPS; the rest wait for the next run.
+      const limit = Number.isInteger(S.settings.libraryMaxDocuments) && S.settings.libraryMaxDocuments > 0 ? S.settings.libraryMaxDocuments : 0;
+      const topics = limit ? wanted.slice(0, limit) : wanted;
+      summary.skippedTopics = eligible.length - wanted.length; summary.heldBack = wanted.length - topics.length;
       run.total = topics.length;
       for (const topic of topics) {
         check(); run.i++; run.label = `${topic.tips} · ${run.i}/${run.total} selected for update`; render();
@@ -626,6 +629,7 @@
       }
       S.documentResult = run.cancel ? 'Update stopped. Completed files were kept.' : started && !run.total ? 'No documents selected for download. No document requests made. See the inventory for any unresolved discrepancies.' : `${summary.topics} document(s) processed · ${summary.pdfs} PDF(s) and ${summary.attachments} attachment(s) added · ${summary.skipped} unchanged file(s) skipped.`;
       if (summary.priorAttachments) S.documentResult += ` ${summary.priorAttachments} of the attachments came from earlier versions.`;
+      if (summary.heldBack) S.documentResult += ` ${summary.heldBack} more document(s) need updating but were left for the next sync: the limit is ${S.settings.libraryMaxDocuments} per sync.`;
       if (summary.skippedTopics) S.documentResult += ` ${summary.skippedTopics} ${priorAttachments ? 'document(s) already checked for earlier-version attachments' : 'unchanged document(s)'} skipped without TIPS requests.`;
       if (summary.errors.length) S.documentResult += ` ${summary.errors.length} issue(s):\n` + summary.errors.slice(0, 100).join('\n');
       if (started) {
@@ -633,6 +637,7 @@
         catch (e) { S.documentInventory = null; S.documentResult += '\nVerification could not finish: ' + e.message; }
       }
       S.documentRun = null; render();
+      pageRefreshWanted();
     }
   }
   let documentsTimer = null;
@@ -737,7 +742,7 @@
   // item.opts (from the row picker): {versions: [n…], att: bool, doc} – only those versions, attachments optional,
   // and the topic data it already read. Without opts: the current version, every prior version and all attachments.
   async function exportDoc(item, files, errors, step, policy = pdfScrubPolicy()) {
-    const base = `${topicName(item)} (Requested)`, o = item.opts || null;
+    const base = topicName(item), o = item.opts || null;   // folder name inside ZIPs and in messages; no "(Requested)" label since 1.21.0
     step('topic data', { g: 'data' });
     let doc = o && o.doc, unavailableVersion = 0;
     if (!doc) {
@@ -1147,6 +1152,64 @@
   host.style.cssText = 'position:fixed;z-index:2147483000;top:0;left:0;width:0;height:0;';
   const root = host.attachShadow({ mode: 'open' });
   let visible = false, justOpened = false, showSettings = false, liText = '', view = 'single', section = 'library';
+
+  // ---- last-sync indicator: part of the Reader's own grey bar under the header (the one that says "No vehicle
+  // specified" on the left and the Reader version on the right). It is a normal element in that bar, not an overlay.
+  // It shows when TIPS was last checked and what that found; while a sync runs it shows progress. Clicking opens the drawer.
+  let pillEl = null;
+  // After a sync that brought new or changed documents, the TIPS page is reloaded once so its own lists show them.
+  // It waits while you are typing, have the drawer or a dialog open, or a download is running.
+  let refreshFor = null, refreshTimer = null, pillShown = '';
+  const REFRESH_KEY = 'tipsxRefreshedFor';
+  const refreshedFor = () => { try { return sessionStorage.getItem(REFRESH_KEY); } catch (_) { return null; } };
+  const ago = iso => { const m = Math.max(0, Math.round((Date.now() - Date.parse(iso)) / 60000)); return m < 1 ? 'just now' : m < 60 ? m + ' min ago' : m < 1440 ? Math.floor(m / 60) + ' h ' + (m % 60) + ' min ago' : Math.floor(m / 1440) + ' day(s) ago'; };
+  function pillState() {
+    const lc = S.lastCheck, d = S.documents || {};
+    if (S.documentRun) return { c: 'w', t: S.documentRun.scan ? 'Scanning the library…' : 'Syncing library…' + (S.documentRun.total ? ` ${S.documentRun.i}/${S.documentRun.total}` : '') };
+    if (S.checking) return { c: 'w', t: 'Checking TIPS for new documents…' };
+    if (refreshFor) return { c: 'a', t: 'New documents saved · click to refresh this page now' };
+    if (S.sessionExpired) return { c: 'a', t: 'Sync paused · log in to TIPS again' };
+    if (!lc || !Number.isFinite(Date.parse(lc.at))) return { c: '', t: 'TIPS Exporter · not synced yet' };
+    const news = lc.fresh || lc.updated ? `${lc.fresh || 0} new, ${lc.updated || 0} updated` : 'nothing new';
+    const off = !d.configured ? ' · no library folder' : !d.auto ? ' · automatic sync off' : '';
+    return { c: off ? '' : 'g', t: `Last sync ${when(lc.at)} (${ago(lc.at)}) · ${news}${off}`, title: 'Last check of TIPS: ' + new Date(lc.at).toLocaleString() + '. Click to open TIPS Exporter.' };
+  }
+  function syncPill() {
+    if (!loaded) return;
+    const bar = document.querySelector('vehicle-navbar .navbar');
+    if (!bar) return;   // a page without that bar shows no indicator
+    if (!pillEl) {
+      pillEl = document.createElement('button'); pillEl.type = 'button'; pillEl.className = 'tipsx-sync';
+      pillEl.innerHTML = '<span class="tipsx-sync-dot"></span><span class="tipsx-sync-tx"></span>';
+      pillEl.onclick = () => { if (refreshFor) tryPageRefresh(true); else openDrawer(true); };
+    }
+    // The Reader redraws this bar (for example when a vehicle is chosen): put the indicator back, left of the version.
+    if (pillEl.parentElement !== bar) { bar.insertBefore(pillEl, bar.querySelector(':scope > .tips-version-block')); pillShown = ''; }
+    const s = pillState(), key = s.c + '|' + s.t;
+    if (key === pillShown) return;
+    pillShown = key;
+    pillEl.dataset.kind = s.c; pillEl.title = s.title || 'Click to open TIPS Exporter.';
+    pillEl.lastChild.textContent = s.t;
+  }
+  function userBusyOnPage() {
+    const a = document.activeElement;
+    return visible || noteOpen || !!pick || busy() || S.checking || !!persisting || S.single?.phase === 'looking' ||
+      !!(a && (/^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName) || a.isContentEditable));
+  }
+  function pageRefreshWanted() {
+    const lc = S.lastCheck;
+    if (!S.settings.autoRefreshPage || !lc || !(lc.fresh || lc.updated) || refreshedFor() === lc.at) return;
+    refreshFor = lc.at; syncPill(); tryPageRefresh();
+  }
+  function tryPageRefresh(now = false) {
+    clearTimeout(refreshTimer);
+    if (!refreshFor) return;
+    if (!now && !S.settings.autoRefreshPage) { refreshFor = null; syncPill(); return; }
+    if (!now && userBusyOnPage()) { refreshTimer = setTimeout(tryPageRefresh, 15000); return; }
+    try { sessionStorage.setItem(REFRESH_KEY, refreshFor); } catch (_) {}   // once per check, so a reload can never loop
+    location.reload();
+  }
+  setInterval(() => { try { syncPill(); } catch (_) {} }, 30000);
   let railFlash = 0, lastView = 'single';
   let sDraft = {};   // unsaved Settings edits, kept across re-renders until Save / close / Re-detect
   const EXT_VERSION = (hasChrome && chrome.runtime && chrome.runtime.getManifest && chrome.runtime.getManifest().version) || 'dev';
@@ -1407,6 +1470,8 @@
       <span class="mut sm">Check when TIPS opens, then every ${s.pollMinutes ?? 10} minutes while TIPS remains open. Change the interval in Settings.</span>
       ${S.sessionExpired ? '<span class="alc sm">Automatic checks paused until you log in again and reload this tab or use Sync now.</span>' : ''}
       <label class="ck"><input type="checkbox" id="library_missing" ${S.settings.libraryIncludeMissing ? 'checked' : ''} ${disabled ? 'disabled' : ''}> Download indexed documents missing from this folder</label>
+      <span>Most documents to request in one sync <input type="number" id="library_max" min="0" max="100000" step="1" style="width:6em" value="${Number.isInteger(S.settings.libraryMaxDocuments) && S.settings.libraryMaxDocuments > 0 ? S.settings.libraryMaxDocuments : 0}" ${disabled ? 'disabled' : ''}> <span class="mut sm">0 = no limit. The rest wait for the next sync.</span></span>
+      <label class="ck"><input type="checkbox" id="library_refresh" ${S.settings.autoRefreshPage ? 'checked' : ''} ${disabled ? 'disabled' : ''}> Refresh the TIPS page after new documents are saved</label>
       <span class="mut sm">Sync checks recent index changes, then downloads only changed or missing files. TIPS must be open and logged in.</span>
       ${!S.index.length ? '<span class="alc sm">Select your existing index in Folder settings. To start a new catalogue, use Advanced → Bulk export → Build index.</span>' : `<span class="mut sm">${fmtN(S.index.length)} indexed documents${S.lastCheck ? ' · Last check ' + esc(when(S.lastCheck.at)) : ''}</span>`}
       ${folderProblem() ? `<span class="alc sm">${esc(S.folder.message || 'Index synchronization needs attention. Open Folder settings.')}</span>` : ''}
@@ -1572,7 +1637,7 @@
   }
 
   function render() {
-    syncRail();
+    syncRail(); syncPill();
     if (!visible) { root.innerHTML = ''; syncToolbar(); syncRows(); return; }
     // keep typing focus and scroll position across re-renders
     const ae = root.activeElement, focusId = ae && ae.id, focusLi = focusId === 'li';
@@ -1622,6 +1687,8 @@
     on('library_folders', 'onclick', openFolderSettings);
     on('library_auto', 'onchange', safeRun(async () => { await documentsRequest('set-auto', { auto: $('library_auto').checked }); render(); }));
     on('library_missing', 'onchange', async e => { s.libraryIncludeMissing = e.target.checked; await saveSettings(); });
+    on('library_refresh', 'onchange', async e => { s.autoRefreshPage = e.target.checked; await saveSettings(); if (!s.autoRefreshPage) tryPageRefresh(); });
+    on('library_max', 'onchange', async e => { const n = Math.floor(+e.target.value); s.libraryMaxDocuments = Number.isFinite(n) && n > 0 ? Math.min(n, 100000) : 0; await saveSettings(); render(); });
 
     // single LI
     const lookup = safeRun(() => { section = 'advanced'; return lookupSpecific(liText); });
@@ -1882,6 +1949,11 @@
   .tipsx-rbadge{position:absolute;top:4px;right:4px;min-width:18px;height:18px;padding:0 4px;box-sizing:border-box;border-radius:9px;display:flex;align-items:center;justify-content:center;
     background:#006EFF;color:#fff;font:700 11px/1 Arial,sans-serif;pointer-events:none;z-index:1}
   .tipsx-rbadge[data-kind=done]{background:#018601}
+  .tipsx-sync{all:unset;box-sizing:border-box;flex:none;display:inline-flex;align-items:center;gap:8px;margin-left:16px;padding:2px 4px;cursor:pointer;white-space:nowrap;
+    font:inherit;font-size:14px;line-height:20px;color:#444}
+  .tipsx-sync:hover{color:#000;text-decoration:underline} .tipsx-sync:focus-visible{outline:2px solid #006EFF;outline-offset:2px}
+  .tipsx-sync-dot{flex:none;width:8px;height:8px;border-radius:50%;background:#9e9e9e}
+  .tipsx-sync[data-kind=g] .tipsx-sync-dot{background:#018601} .tipsx-sync[data-kind=w] .tipsx-sync-dot{background:#006EFF} .tipsx-sync[data-kind=a] .tipsx-sync-dot{background:#E67E00}
   .tipsx-row{position:absolute;right:10px;top:50%;transform:translateY(-50%);display:flex;align-items:center;gap:2px;z-index:2}
   .tipsx-rdl:focus-visible{outline:2px solid #006EFF;outline-offset:2px}
   .tipsx-rdl{width:36px;height:36px;display:inline-flex;align-items:center;justify-content:center;border:0;background:transparent;color:#595959;cursor:pointer;padding:0}
@@ -1971,6 +2043,7 @@
   }
   function injectToolbar() {
     injectQueued = false;
+    try { syncPill(); } catch (_) {}
     if (!document.getElementById('tipsx-page-css')) {
       const st = document.createElement('style'); st.id = 'tipsx-page-css'; st.textContent = PAGE_CSS;
       (document.head || document.documentElement).appendChild(st);
@@ -2152,7 +2225,7 @@
   }
   let injectQueued = false;
   new MutationObserver(muts => {
-    if (injectQueued || muts.every(m => m.target.closest && m.target.closest('.tipsx-dlwrap, .tipsx-rbadge, .tipsx-menuitem, .tipsx-row, .tipsx-chkwrap'))) return;   // ignore our own updates
+    if (injectQueued || muts.every(m => m.target.closest && m.target.closest('.tipsx-dlwrap, .tipsx-rbadge, .tipsx-menuitem, .tipsx-row, .tipsx-chkwrap, .tipsx-sync'))) return;   // ignore our own updates
     injectQueued = true; requestAnimationFrame(injectToolbar);
   }).observe(document.documentElement, { childList: true, subtree: true });
 
@@ -2183,6 +2256,8 @@
     if (chrome.storage.onChanged) chrome.storage.onChanged.addListener((changes, area) => {
       if (area !== 'local') return;
       if (changes.indexFolder) S.folder = changes.indexFolder.newValue || { configured: false, epoch: null };
+      if (changes.lastCheck && !S.checking) { S.lastCheck = changes.lastCheck.newValue || null; syncPill(); }
+      if (changes.documentsFolder && !S.documentRun && ['saved', 'error'].includes(changes.documentsFolder.newValue?.phase) && changes.documentsFolder.oldValue?.phase === 'running') setTimeout(pageRefreshWanted, 2000);
       if (changes.documentsFolder) {
         const next = changes.documentsFolder.newValue || { configured: false };
         if (S.documents.epoch !== next.epoch || S.documents.attachmentFolder !== next.attachmentFolder) { S.documentInventory = null; S.documentResult = ''; }
@@ -2194,7 +2269,7 @@
     });
   }
 
-  if (!hasChrome) window.__TIPSX_DEBUG = { S, importLog, refreshIndex, showNotice, prepareBatch, approve, discard, render, progressCsv, nextBatch, lookupSpecific, downloadFound, downloadOpenTopic };
+  if (!hasChrome) window.__TIPSX_DEBUG = { pageRefreshWanted, syncPill, S, importLog, refreshIndex, showNotice, prepareBatch, approve, discard, render, progressCsv, nextBatch, lookupSpecific, downloadFound, downloadOpenTopic };
 
   document.documentElement.appendChild(host);
   load().then(async () => { await restoreKept(); if (!S.settings.user) await detectUserFallback(); await saveSettings(); readyForPolling = true; render(); autoCheckOnLoad(); });

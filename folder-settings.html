@@ -17,6 +17,9 @@
     <p id="documents-location">Reading settings…</p><p id="documents-status" role="status" aria-live="polite"></p>
     <button id="choose-documents" class="primary" disabled>Choose documents folder…</button><p id="selected-documents" class="hint">Select the parent containing your document folders (LI/GI), including any batch subfolders.</p>
     <label for="documents-attachments">Attachment subfolder inside each document</label><input id="documents-attachments" value="Attachments and Links" spellcheck="false" autocomplete="off">
+    <label class="check"><input type="checkbox" id="documents-library"> LI Library layout (the folder LI Organizer builds)</label>
+    <label for="documents-older">Earlier-versions subfolder inside each document</label><input id="documents-older" value="Older versions" spellcheck="false" autocomplete="off">
+    <p class="hint">With LI Library layout on, the newest version of a document sits in its folder and earlier versions are filed in this subfolder; when a new version arrives, the previous one is moved there. A new document gets a folder named "LI number - title" inside its group folder (for example "54 Electrical and instruments"). Leave it off to keep every version side by side in the document folder, as before.</p>
     <label class="check"><input type="checkbox" id="documents-auto" checked> Automatically sync</label>
     <label for="documents-poll-minutes">Check every (minutes)</label><input type="number" id="documents-poll-minutes" min="1" max="1440" step="1" value="10">
     <p class="hint">Default: 10 minutes. Checks run when TIPS opens and repeat while a logged-in TIPS tab stays open, including in the background. Busy downloads are skipped until a later check. Turning off automatic sync pauses the schedule.</p>

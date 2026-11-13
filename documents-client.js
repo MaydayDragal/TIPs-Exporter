@@ -10,9 +10,14 @@
     const escaped = String(item.tips).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), exceptions = new Map(), remaining = [];
     const unavailable = new RegExp('^' + escaped + ': v([1-9]\\d*) (?:not available in TIPS|PDF HTTP 404)$');
     const scrub = new RegExp('^' + escaped + '[^/]*[/]' + escaped + '_v([1-9]\\d*)\\.pdf: PDF scrub failed \\((encrypted PDF|unsupported, damaged, or unreadable PDF)\\); PDF omitted\\.$');
+    // An attached PDF that cannot be cleaned (encrypted or unreadable) fails the same way every time. It is left out and
+    // reported, but it is not a reason to request the whole document again on every sync. A missing PDF engine is
+    // different: that is fixed by reloading, so it stays retryable.
+    const attachmentScrub = /\/[^/]+: PDF scrub failed \((?:encrypted PDF|unsupported, damaged, or unreadable PDF)\); PDF omitted\.$/;
     for (const message of errors) {
       if (message.endsWith(PRIOR_NOTE)) continue;   // reported in the summary, but not a reason to retry the LI
       const u = unavailable.exec(message), s = scrub.exec(message), current = message === `${item.tips}: current PDF HTTP 404`;
+      if (!u && !s && !current && attachmentScrub.test(message)) continue;
       const version = u ? +u[1] : s ? +s[1] : current ? +item.version : 0;
       if (!Number.isSafeInteger(version) || version < 1 || version > 10000) { remaining.push(message); continue; }
       exceptions.set(version, { version, kind: s ? 'scrub_failed' : 'unavailable', reason: s ? 'PDF could not be scrubbed: ' + s[2] : 'Version not available in TIPS', at });

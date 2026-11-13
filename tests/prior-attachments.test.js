@@ -29,7 +29,7 @@ const VERSIONS = {
 };
 const BYTES = { a: 'old photo', b: 'filter photo', c: 'diagram', d: 'new photo' };
 const ITEM = { tips: 'LI20.10-P-076206', tipsId: 242202917, version: 3, title: 'Various CELs related to coolant temperature' };
-const BASE = 'LI20.10-P-076206 - Various CELs related to coolant temperature (Requested)';
+const BASE = 'LI20.10-P-076206 - Various CELs related to coolant temperature';
 
 async function zipEnv({ settings = {}, versions = VERSIONS, fail = {} } = {}) {
   const dom = new JSDOM('<!doctype html><body>TIPS Reader v1.22.0 - 2026</body>', { url: 'https://xentry.mercedes-benz.com/tips-reader/search/topics', runScripts: 'outside-only', pretendToBeVisual: true });
