@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "TIPS Exporter",
-  "version": "1.21.0",
+  "version": "1.22.0",
   "minimum_chrome_version": "111",
   "description": "Keep local XENTRY TIPS LIs and attachments updated, preserve older files, and scrub user IDs and download dates from new PDFs.",
   "permissions": [
@@ -44,10 +44,22 @@
         "https://xentry.mercedes-benz.com/tips-reader/*"
       ],
       "js": [
-        "pagesize-probe.js"
+        "pagesize-probe.js",
+        "case-inspector-core.js",
+        "case-inspector-probe.js"
       ],
       "run_at": "document_start",
       "world": "MAIN"
+    },
+    {
+      "matches": [
+        "https://xentry.mercedes-benz.com/tips-reader/*"
+      ],
+      "js": [
+        "case-inspector-core.js",
+        "case-inspector.js"
+      ],
+      "run_at": "document_start"
     },
     {
       "matches": [
