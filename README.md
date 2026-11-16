@@ -2,7 +2,11 @@
 
 TIPS Exporter keeps a local library of XENTRY TIPS LIs and attachments up to date. It runs inside your logged-in TIPS tab, checks recent index changes, and downloads only changed or missing files into their existing folders. New PDFs undergo required cleanup of `D7MASALL`, download/print stamps and metadata before saving. Older versions and attachments are preserved.
 
-**Contents:** [Install](#install) · [Shared index folder](#shared-index-folder) · [Saved documents folder](#saved-documents-folder-and-verification) · [LI Library layout](#li-library-layout) · [On the TIPS page](#on-the-tips-page-last-sync-and-refresh) · [What a sync requests](#what-a-sync-requests-from-tips) · [Attachments from earlier versions](#attachments-from-earlier-versions) · [Download LI documents](#download-li-documents) · [PDF scrubbing](#automatic-pdf-scrubbing) · [Bulk export](#advanced-bulk-export) · [Troubleshooting](#troubleshooting) · [For developers](#for-developers)
+**Contents:** [Install](#install) · [Case Inspector](#case-inspector) · [Shared index folder](#shared-index-folder) · [Saved documents folder](#saved-documents-folder-and-verification) · [LI Library layout](#li-library-layout) · [On the TIPS page](#on-the-tips-page-last-sync-and-refresh) · [What a sync requests](#what-a-sync-requests-from-tips) · [Attachments from earlier versions](#attachments-from-earlier-versions) · [Download LI documents](#download-li-documents) · [PDF scrubbing](#automatic-pdf-scrubbing) · [Bulk export](#advanced-bulk-export) · [Troubleshooting](#troubleshooting) · [For developers](#for-developers)
+
+**Version 1.22.1:** fixes the missing Cases tab when the early inspector startup is missed. Inspector scripts also initialize with the drawer; Cases remains visible with recovery instructions if startup fails.
+
+**Version 1.22.0:** adds a passive [Case Inspector](#case-inspector) for case metadata, rating candidates, communication candidates, and searchable API captures. No extra permissions or backend requests.
 
 **Version 1.21.0:** the documents folder can be the library that **LI Organizer** builds, and a sync asks TIPS for less.
 
@@ -56,6 +60,24 @@ TIPS Exporter keeps a local library of XENTRY TIPS LIs and attachments up to dat
 Needs Chrome 111 or newer.
 
 **Updating:** unzip the new release to the same place (replacing the files), click the reload icon on TIPS Exporter in `chrome://extensions`, and reload the TIPS tab. Your folder selections, session settings, custom scrub rules, progress and recent downloads are kept. Required PDF cleanup is enforced even if an older installation had disabled scrubbing. The previous all-data-files default switches to PDFs/attachments only on the first upgrade; custom file selections are preserved. You can re-enable any data files under **⚙ → Advanced ZIP contents**. A batch or interrupted download prepared under an older PDF cleanup policy or layout must be prepared again; completed export progress is unchanged.
+
+## Case Inspector
+
+After updating the extension, reload your XENTRY tab, open **TIPS Exporter → Cases**, and open a case normally. Visit its communication/history sections to capture the responses they load.
+
+- **Overview:** rating candidates and returned metadata with their exact JSON field paths and source request. Zero is a real returned value; absent/null ratings are **Unavailable**. Unknown rating scales are not converted to stars.
+- **Communication:** candidate message/comment/reply fields, including additional entries if the server sends them. A field-name match does not prove a message is internal, hidden, or otherwise absent from the normal page.
+- **Raw data:** expandable request/response JSON, method, URL, HTTP status and timing. Search filters captured records across their fields. **Copy JSON** and **Export JSON** include all matching records in the selected context.
+- **Case / page context:** defaults to the current route. Captured requests remain grouped by the page where they started, even when responses finish after navigation. Select an earlier context to inspect it. This is contextual attribution, not verified ownership of every returned object.
+- **Pause capture** stops retaining new responses and cancels pending observer reads; **Clear all captures** removes the tab's capture history. Neither changes the case or sends a backend request.
+
+Capture observes the page's same-origin `/tips/<service>/api/` fetch/XHR calls while viewing cases, plus case-service/case endpoints elsewhere. It does not capture WebSockets, service-worker-only requests, file downloads, cross-origin services, or server-to-server communication. Authentication/current-user endpoints are excluded. Unknown endpoints outside this scope are not probed.
+
+Bodies must be JSON and no larger than 256 KiB. The observer reads at most 16 body streams concurrently, each for at most 10 seconds; omissions have an explicit reason. Each world keeps a bounded mirror of up to 100 records / 2 MiB serialized data. Old records are evicted with a visible counter. Individual strings are capped at 16,000 characters and sanitization at 5,000 values / 20 levels; truncations are marked in the captured JSON. Summary lists and message previews also have display limits. Raw data shows the retained JSON, but cannot restore omitted or truncated data.
+
+Headers/cookies are not collected. Named authentication fields, bearer strings and signed URL parameters are redacted before the page bridge and again at the viewer boundary. This is **not a general personal-data scrubber**: case text, names, vehicle identifiers and other personal information may remain in copied/exported JSON. Captures stay in this tab's memory until you explicitly export/copy them; reload or tab closure clears them.
+
+The Inspector can only show information XENTRY returns to your browser. It cannot retrieve backend-only messages or fields withheld by the server. The initial schemas are heuristic because saved HTML/MHTML does not include the original API response bodies. Live XENTRY verification is still required to confirm actual rating/message field names.
 
 ## Shared index folder
 
@@ -358,3 +380,4 @@ powershell -ExecutionPolicy Bypass -File tests\browser\run-in-chrome.ps1
 ```
 
 `vendor/pdf-lib.min.js` is the bundled, unmodified pdf-lib 1.17.1 UMD distribution; its MIT license is in `vendor/pdf-lib.LICENSE.md`. `pdf-scrubber.js` is adapted from the provided LI PDF Scrub HTML. The new PDF tests use real generated PDFs and inspect the PDFs extracted from the exported ZIPs. Endpoint simulation tests also use real PDF fixtures, so required cleanup is exercised without contacting TIPS. Library tests cover startup pause, incremental requests, old-setting migration, folder preservation, missing-folder preferences, interval settings, alarm recovery, multiple tabs, busy-run overlap and session expiry.
+
