@@ -1636,10 +1636,13 @@
       [true, 'Extension', `v${EXT_VERSION}`]];
   }
 
-  const caseInspector = globalThis.TipsCaseInspector;
-  caseInspector?.onChange(() => { if (visible && section === 'cases' && !showSettings) render(); });
+  let caseInspector;
+  const caseInspectorUnavailable = '<div class="sec" role="status"><h3>Case Inspector did not start</h3><p>Reload TIPS Exporter on your browser’s Extensions page, then refresh this XENTRY tab. If this message remains, replace all extension files with the latest complete download and reload again.</p></div>';
 
   function render() {
+    // Discover the module on every render: a missed or late document_start must not hide Cases.
+    caseInspector = globalThis.TipsCaseInspector;
+    caseInspector?.onChange(() => { if (visible && section === 'cases' && !showSettings) render(); });
     syncRail(); syncPill();
     if (!visible) { root.innerHTML = ''; syncToolbar(); syncRows(); return; }
     // keep typing focus and scroll position across re-renders
@@ -1662,10 +1665,10 @@
         <div class="hd"><div class="ttl"><h2>TIPS Exporter</h2>${status}</div>
           <div class="hb"><button class="ib" id="gear" aria-label="Settings" aria-pressed="${showSettings}">${svg('<circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>', 22, 1.5)}</button>
             <span class="sep"></span><button class="ib" id="close" aria-label="Close">${svg('<path d="M18 6L6 18"></path><path d="M6 6l12 12"></path>', 22, 1.5)}</button></div></div>
-        <div class="tabs" role="tablist" aria-label="Extension sections"><button class="tab" role="tab" id="tolibrary" aria-selected="${!showSettings && section === 'library'}">Library</button><button class="tab" role="tab" id="toadvanced" aria-selected="${!showSettings && section === 'advanced'}">Advanced</button>${caseInspector ? `<button class="tab" role="tab" id="tocases" aria-selected="${!showSettings && section === 'cases'}">Cases</button>` : ''}</div>
+        <div class="tabs" role="tablist" aria-label="Extension sections"><button class="tab" role="tab" id="tolibrary" aria-selected="${!showSettings && section === 'library'}">Library</button><button class="tab" role="tab" id="toadvanced" aria-selected="${!showSettings && section === 'advanced'}">Advanced</button><button class="tab" role="tab" id="tocases" aria-selected="${!showSettings && section === 'cases'}">Cases</button></div>
         ${S.msg ? `<div class="note" role="status"><span>${esc(S.msg)}</span><button id="msgx" aria-label="Dismiss message">×</button></div>` : ''}
         <div class="body" id="body">${showSettings ? v.body : `<div id="library_panel" ${section !== 'library' ? 'hidden' : ''}>${vLibrary()}</div>
-          <div id="advanced_panel" ${section !== 'advanced' ? 'hidden' : ''}><div class="tabs" role="tablist" aria-label="Manual ZIP exports"><button class="tab" role="tab" id="tosingle" aria-selected="${view === 'single'}">Single LI</button><button class="tab" role="tab" id="tobulk" aria-selected="${view === 'bulk'}">Bulk export</button></div>${v.body}</div>${caseInspector ? `<div id="cases_panel" ${section !== 'cases' ? 'hidden' : ''}>${section === 'cases' ? caseInspector.html() : ''}</div>` : ''}`}</div>
+          <div id="advanced_panel" ${section !== 'advanced' ? 'hidden' : ''}><div class="tabs" role="tablist" aria-label="Manual ZIP exports"><button class="tab" role="tab" id="tosingle" aria-selected="${view === 'single'}">Single LI</button><button class="tab" role="tab" id="tobulk" aria-selected="${view === 'bulk'}">Bulk export</button></div>${v.body}</div><div id="cases_panel" ${section !== 'cases' ? 'hidden' : ''}>${section === 'cases' ? (caseInspector ? caseInspector.html() : caseInspectorUnavailable) : ''}</div>`}</div>
         <div class="ft"><span class="sess">${sessionOK() ? `<span class="okc" style="display:flex">${svg('<path d="M20 6L9 17l-5-5"></path>', 16, 2.4)}</span>Session OK · ${esc(s.user)}` : `<span class="alc" style="display:flex">${svg('<path d="M12 9v4"></path><path d="M12 17h.01"></path><path d="M10.3 3.9L1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"></path>', 16, 2)}</span>Session not detected – open any topic once, or check ⚙`}</span>
 <span class="mut sm">v${esc(EXT_VERSION)}</span>
           ${!showSettings ? `<div class="acts" ${section !== 'library' ? 'hidden' : ''}><button class="b pri" id="library_sync" ${busy() || S.checking || S.single?.phase === 'looking' || !S.documents.configured || !S.index.length ? 'disabled' : ''}>${S.checking ? 'Checking changes…' : 'Sync now'}</button></div>` : ''}

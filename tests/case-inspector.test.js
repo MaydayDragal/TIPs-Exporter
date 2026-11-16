@@ -13,7 +13,7 @@ function env() {
   const w = dom.window;
   Object.assign(w, { Response, Request, Headers, TextDecoder, TextEncoder, ReadableStream });
   // jsdom does not implement same-window source/origin for postMessage.
-  w.postMessage = data => queueMicrotask(() => w.dispatchEvent(new w.MessageEvent('message', { data, source: w, origin: w.location.origin })));
+  w.postMessage = data => queueMicrotask(() => { if (w.location) w.dispatchEvent(new w.MessageEvent('message', { data, source: w, origin: w.location.origin })); });
   w.eval(src('case-inspector-core.js'));
   return { dom, w };
 }
@@ -184,6 +184,35 @@ test('manifest scripts integrate Cases into the real drawer without breaking Lib
   root.getElementById('tolibrary').click();assert.equal(root.getElementById('library_panel').hidden,false);assert.equal(root.getElementById('cases_panel').hidden,true);
   root.getElementById('toadvanced').click();assert.equal(root.getElementById('advanced_panel').hidden,false);assert(root.getElementById('look'));
   e.dom.window.close();
+});
+test('Cases remains visible when inspector startup is missing and recovers after a late load', async () => {
+  const e=env(), w=e.w;
+  try {
+    const state={};w.chrome={storage:{local:{get:async k=>({[k]:state[k]}),set:async o=>Object.assign(state,o)}},runtime:{onMessage:{addListener(fn){w.toggleExporter=fn;}},getManifest:()=>({version:'1.22.1'})}};
+    w.fetch=async()=>new Response('{}',{headers:{'content-type':'application/json'}});
+    for(const f of ['index-csv.js','content.js'])w.eval(src(f));
+    await tick();w.toggleExporter({type:'toggle'},null,()=>{});await tick();
+    const root=[...w.document.documentElement.children].find(el=>el.shadowRoot).shadowRoot;
+    assert(root.getElementById('tocases'), 'Cases must not disappear when its module is missing');
+    root.getElementById('tocases').click();assert(root.getElementById('cases_panel').textContent.includes('did not start'));
+    w.eval(src('case-inspector.js'));
+    root.getElementById('tolibrary').click();root.getElementById('tocases').click();
+    assert(root.getElementById('case_overview'));assert(!root.getElementById('cases_panel').textContent.includes('did not start'));
+  } finally {w.close();}
+});
+test('drawer script group initializes the inspector even if the early isolated group was missed', async () => {
+  const e=env(),w=e.w;
+  try {
+    delete w.TipsCaseCore;
+    const state={};w.chrome={storage:{local:{get:async k=>({[k]:state[k]}),set:async o=>Object.assign(state,o)}},runtime:{onMessage:{addListener(fn){w.toggleExporter=fn;}},getManifest:()=>({version:'1.22.1'})}};
+    w.fetch=async()=>new Response('{}',{headers:{'content-type':'application/json'}});
+    const manifest=JSON.parse(src('manifest.json'));
+    const drawer=manifest.content_scripts.find(group=>group.js.includes('content.js'));
+    for(const f of drawer.js)w.eval(src(f));
+    await tick();w.toggleExporter({type:'toggle'},null,()=>{});await tick();
+    const root=[...w.document.documentElement.children].find(el=>el.shadowRoot).shadowRoot;
+    assert(root.getElementById('tocases'),'late group must include the inspector');root.getElementById('tocases').click();assert(root.getElementById('case_overview'));
+  } finally {w.close();}
 });
 (async () => {
   for (const [name, fn] of tests) { try { await fn(); console.log('PASS ' + name); } catch (err) { console.error('FAIL ' + name + ': ' + err.stack); process.exitCode = 1; if (!C) break; } }

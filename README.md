@@ -4,6 +4,8 @@ TIPS Exporter keeps a local library of XENTRY TIPS LIs and attachments up to dat
 
 **Contents:** [Install](#install) · [Case Inspector](#case-inspector) · [Shared index folder](#shared-index-folder) · [Saved documents folder](#saved-documents-folder-and-verification) · [LI Library layout](#li-library-layout) · [On the TIPS page](#on-the-tips-page-last-sync-and-refresh) · [What a sync requests](#what-a-sync-requests-from-tips) · [Attachments from earlier versions](#attachments-from-earlier-versions) · [Download LI documents](#download-li-documents) · [PDF scrubbing](#automatic-pdf-scrubbing) · [Bulk export](#advanced-bulk-export) · [Troubleshooting](#troubleshooting) · [For developers](#for-developers)
 
+**Version 1.22.1:** fixes the missing Cases tab when the early inspector startup is missed. Inspector scripts also initialize with the drawer; Cases remains visible with recovery instructions if startup fails.
+
 **Version 1.22.0:** adds a passive [Case Inspector](#case-inspector) for case metadata, rating candidates, communication candidates, and searchable API captures. No extra permissions or backend requests.
 
 **Version 1.21.0:** the documents folder can be the library that **LI Organizer** builds, and a sync asks TIPS for less.
