@@ -61,6 +61,7 @@
     S.history = await store.get('history', []);
     S.recent = await store.get('recent', []);
     S.lastCheck = await store.get('lastCheck', null);
+    S.pollLast = await store.get('pollLast', null);
     S.retry = await store.get('retry', {});
     const saved = await store.get('settings', {});
     // Adopt the example's PDFs/attachments-only default once. Preserve custom file selections and
@@ -539,6 +540,28 @@
     if (S.sessionExpired || !sessionOK()) return 'log in to TIPS again';
     if (navigator.onLine === false) return 'offline';
     return '';
+  }
+  // What the background timer last found, when that was after the last sync.
+  const POLL_OUTCOMES = { 'no-access': 'documents folder needs access – open Folder settings', 'no-tab': 'no TIPS tab was open',
+    asleep: 'Chrome put this tab to sleep in the background', busy: 'another download or scan was running', 'not-ready': 'TIPS was not ready', declined: 'TIPS was busy' };
+  function pollOutcomeReason(lc) {
+    const p = S.pollLast;
+    if (!p || !(Date.parse(p.at) > Date.parse(lc?.at))) return 'the background timer has not run';
+    return POLL_OUTCOMES[p.outcome] || '';
+  }
+  // A sleeping (frozen/discarded) background tab misses the timer. When it is shown or resumes, catch up at once
+  // through the same coordinated path as the sync when TIPS opens.
+  let catchingUp = false;
+  async function catchUpSync() {
+    if (catchingUp || !loaded || !readyForPolling || document.visibilityState === 'hidden') return;
+    const d = S.documents || {}, at = Date.parse(S.lastCheck?.at);
+    const period = (Number.isInteger(d.pollMinutes) ? d.pollMinutes : 10) * 60000;
+    if (!d.configured || !d.auto || !pollingStatus().ready || (Number.isFinite(at) && Date.now() - at < period)) return;
+    catchingUp = true;
+    try {
+      try { const result = await chrome.runtime.sendMessage({ type: 'library-poll-startup' }); if (result?.handled) return; } catch (_) {}
+      if (pollingStatus().ready) await scheduledLibrarySync();
+    } finally { catchingUp = false; }
   }
   function pollingStatus() {
     const occupied = !readyForPolling || busy() || S.checking || !!persisting || S.single?.phase === 'looking' || !!pick;
@@ -1214,7 +1237,7 @@
     // Do not show green when automatic sync is on but has missed two intervals: say so, with the reason when known.
     const period = (Number.isInteger(d.pollMinutes) ? d.pollMinutes : 10) * 60000;
     if (!off && Date.now() - Date.parse(lc.at) > 2 * period + 60000) {
-      const why = pollBlockReason();
+      const why = pollBlockReason() || pollOutcomeReason(lc);
       return { c: 'a', t: base.t + ' · automatic sync overdue' + (why ? ' (' + why + ')' : ''),
         title: base.title + (why ? '' : ' If this stays, keep this TIPS tab open (not asleep in the background) or use Sync now.') };
     }
@@ -2311,6 +2334,7 @@
       if (area !== 'local') return;
       if (changes.indexFolder) S.folder = changes.indexFolder.newValue || { configured: false, epoch: null };
       if (changes.lastCheck && !S.checking) { S.lastCheck = changes.lastCheck.newValue || null; syncPill(); }
+      if (changes.pollLast) { S.pollLast = changes.pollLast.newValue || null; syncPill(); }
       if (changes.documentsFolder && !S.documentRun && ['saved', 'error'].includes(changes.documentsFolder.newValue?.phase) && changes.documentsFolder.oldValue?.phase === 'running') setTimeout(pageRefreshWanted, 2000);
       if (changes.documentsFolder) {
         const next = changes.documentsFolder.newValue || { configured: false };
@@ -2326,6 +2350,12 @@
   if (!hasChrome) window.__TIPSX_DEBUG = { pageRefreshWanted, syncPill, S, importLog, refreshIndex, showNotice, prepareBatch, approve, discard, render, progressCsv, nextBatch, lookupSpecific, downloadFound, downloadOpenTopic };
 
   document.documentElement.appendChild(host);
+  if (hasChrome && chrome.runtime?.sendMessage) {
+    const later = () => setTimeout(() => catchUpSync().catch(e => console.warn('TIPS Exporter: catch-up sync', e.message)), 1500);
+    document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') later(); });
+    document.addEventListener('resume', later);   // Page Lifecycle: the tab was unfrozen
+    window.addEventListener('online', later);
+  }
   load().then(async () => { await restoreKept(); if (!S.settings.user) await detectUserFallback(); await saveSettings(); readyForPolling = true; render(); autoCheckOnLoad(); });
   // Every time TIPS is opened, reloaded or refreshed (this script runs once per page load): quick "Check new" once the
   // session is known. One search request in the usual case; silent unless something new or updated turns up, which

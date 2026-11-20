@@ -26,6 +26,8 @@
       catch (_) { return null; }
       finally { clearTimeout(timeout); }
     }
+    // Each scheduled check records what happened, so a TIPS tab can say why automatic sync is overdue.
+    const note = async outcome => { try { await chrome.storage.local.set({ pollLast: { at: new Date(now()).toISOString(), outcome } }); } catch (_) {} };
     async function tick() {
       if (dispatching) return;
       dispatching = true;
@@ -33,18 +35,24 @@
         const { documentsFolder: s, lastCheck } = await chrome.storage.local.get(['documentsFolder', 'lastCheck']);
         if (!enabled(s) || now() - Date.parse(lastCheck?.at) < minutes(s.pollMinutes) * 60000 - 1000) return;
         const connection = await db.get('documentsConnection');
-        if (!connection || await connection.handle.queryPermission({ mode: 'readwrite' }) !== 'granted') return 'no-access';   // the startup caller then runs its own sync, which reports the missing permission
-        const tabs = (await chrome.tabs.query({ url: READER + '*' })).filter(t => Number.isInteger(t.id) && t.url?.startsWith(READER) && !t.discarded);
+        if (!connection || await connection.handle.queryPermission({ mode: 'readwrite' }) !== 'granted') { await note('no-access'); return 'no-access'; }   // the startup caller then runs its own sync, which reports the missing permission
+        const all = (await chrome.tabs.query({ url: READER + '*' })).filter(t => Number.isInteger(t.id) && t.url?.startsWith(READER));
+        if (!all.length) { await note('no-tab'); return; }
+        // Chrome freezes or discards background tabs to save energy/memory; such a tab cannot run a sync.
+        // It catches up itself as soon as it is shown again.
+        const tabs = all.filter(t => !t.discarded && !t.frozen);
         const states = await Promise.all(tabs.map(async tab => ({ tab, state: await message(tab.id, { type: 'library-poll-status' }) })));
         // A manual export, scan or another automatic update gets the whole interval to finish.
-        if (states.some(x => x.state?.busy)) return;
+        if (states.some(x => x.state?.busy)) { await note('busy'); return; }
         const current = (await chrome.storage.local.get(['documentsFolder'])).documentsFolder;
         if (!enabled(current) || current.epoch !== s.epoch) return;
         const candidate = states.filter(x => x.state?.ready).sort((a,b) => Number(!!b.tab.active) - Number(!!a.tab.active) || a.tab.id - b.tab.id)[0];
+        if (!candidate) { await note(states.some(x => x.state) ? 'not-ready' : 'asleep'); return; }
         // A decline can mean manual work started after the status check. A missing
         // reply can mean the check started before its channel closed. In either
         // case, wait for the next interval instead of dispatching to another tab.
-        if (candidate) await message(candidate.tab.id, { type: 'library-poll' });
+        const reply = await message(candidate.tab.id, { type: 'library-poll' });
+        await note(reply?.accepted ? 'dispatched' : 'declined');
       } finally { dispatching = false; }
     }
     function start() {
