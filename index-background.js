@@ -28,8 +28,9 @@
         try { result = await ask(tab.id, { type: 'index-folder-lock', token }); }
         catch (_) { continue; } // tab has no exporter content script yet
         asked.push(tab.id);
-        // A frozen/suspended tab cannot run an export while it does not answer; its late lock is released below.
-        if (result?.timedOut) continue;
+        // Silence is not an idle answer: a frozen tab can still hold a prepared ZIP or an interrupted
+        // export. Refuse with a clear reason instead of hanging; its late lock is released below.
+        if (result?.timedOut) throw Error(`A TIPS tab is not responding (Chrome may have put it to sleep in the background). Switch to each TIPS tab or close the extra ones, then try the ${label} again.`);
         if (!result || result.locked !== true) throw Error(`Finish or discard the current export/check before changing or reloading the ${label}. Reload older TIPS tabs after updating the extension.`);
       }
       return await fn();

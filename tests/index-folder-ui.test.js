@@ -49,15 +49,19 @@ async function test(name, fn) { try { await fn(); console.log('PASS ' + name); }
     e.setBusy(false); await e.db.put('candidate:two', { handle: d, filename: FILE });
     assert((await e.send('connect', { token: 'two' })).ok); assert.equal(e.state.index[0].tips, ITEM.tips); assert(e.counters().releases > 0);
   });
-  await test('a TIPS tab that never answers the lock does not hang the request or leave a lock behind', async () => {
+  await test('a TIPS tab that never answers the lock is refused promptly instead of hanging, and is unlocked', async () => {
     const e = worker(), d = dir(CSV.stringify([ITEM], {})); await e.db.put('candidate:one', { handle: d, filename: FILE });
     const sent = [];
     e.chrome.tabs.query = async () => [{ id: 1 }, { id: 2 }];
     e.chrome.tabs.sendMessage = (id, m) => { sent.push([id, m.type]); return id === 2 && m.type === 'index-folder-lock' ? new Promise(() => {}) : Promise.resolve(m.type === 'index-folder-lock' ? { locked: true } : true); };
     const r = await e.send('connect', { token: 'one' });
-    assert(r.ok, 'connect completes although tab 2 is frozen');
+    assert.equal(r.ok, false, 'a silent tab is not treated as idle');
+    assert.match(r.error, /not responding/);
+    assert.equal(e.state.index.length, 0, 'the index is not replaced underneath the silent tab');
     assert.deepEqual(sent.filter(x => x[1] === 'index-folder-unlock').map(x => x[0]).sort(), [1, 2], 'every asked tab, including the silent one, is unlocked');
-    assert((await e.send('load')).ok, 'load also completes');
+    e.chrome.tabs.query = async () => [{ id: 1 }];
+    await e.db.put('candidate:two', { handle: d, filename: FILE });
+    assert((await e.send('connect', { token: 'two' })).ok, 'connect works once the silent tab is gone');
   });
   await test('folder Settings picks a directory, edits the filename, persists the handle and renews access', async () => {
     const e = worker(), d = dir(), dom = new JSDOM(fs.readFileSync(path.join(ROOT, 'folder-settings.html'), 'utf8'), {
