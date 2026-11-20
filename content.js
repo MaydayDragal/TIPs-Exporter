@@ -528,9 +528,21 @@
     const checked = await refreshIndex(false, false, false);
     if (checked) await updateDocuments({ includeMissing: S.settings.libraryIncludeMissing });
   }
+  // Why a scheduled sync would not run in this tab right now ('' = it can run). An index folder problem
+  // (for example access that Chrome reset after a restart) does not stop it: progress is kept in Chrome
+  // and written to the folder once access returns, exactly as for the sync that runs when TIPS opens.
+  // Blocking on it made automatic sync stop silently after that first sync.
+  function pollBlockReason() {
+    if (!S.documents.configured) return 'no library folder';
+    if (!S.documents.auto) return 'automatic sync off';
+    if (!S.index.length) return 'no index';
+    if (S.sessionExpired || !sessionOK()) return 'log in to TIPS again';
+    if (navigator.onLine === false) return 'offline';
+    return '';
+  }
   function pollingStatus() {
     const occupied = !readyForPolling || busy() || S.checking || !!persisting || S.single?.phase === 'looking' || !!pick;
-    return { busy: occupied, ready: !occupied && !!(S.documents.configured && S.documents.auto && S.index.length && sessionOK() && !S.sessionExpired && !folderProblem() && navigator.onLine !== false) };
+    return { busy: occupied, ready: !occupied && !pollBlockReason() };
   }
   async function scheduledLibrarySync() {
     clearTimeout(documentsTimer);
@@ -1198,7 +1210,15 @@
     if (!lc || !Number.isFinite(Date.parse(lc.at))) return { c: '', t: 'TIPS Exporter · not synced yet' };
     const news = lc.fresh || lc.updated ? `${lc.fresh || 0} new, ${lc.updated || 0} updated` : 'nothing new';
     const off = !d.configured ? ' · no library folder' : !d.auto ? ' · automatic sync off' : '';
-    return { c: off ? '' : 'g', t: `Last sync ${when(lc.at)} (${ago(lc.at)}) · ${news}${off}`, title: 'Last check of TIPS: ' + new Date(lc.at).toLocaleString() + '. Click to open TIPS Exporter.' };
+    const base = { t: `Last sync ${when(lc.at)} (${ago(lc.at)}) · ${news}${off}`, title: 'Last check of TIPS: ' + new Date(lc.at).toLocaleString() + '. Click to open TIPS Exporter.' };
+    // Do not show green when automatic sync is on but has missed two intervals: say so, with the reason when known.
+    const period = (Number.isInteger(d.pollMinutes) ? d.pollMinutes : 10) * 60000;
+    if (!off && Date.now() - Date.parse(lc.at) > 2 * period + 60000) {
+      const why = pollBlockReason();
+      return { c: 'a', t: base.t + ' · automatic sync overdue' + (why ? ' (' + why + ')' : ''),
+        title: base.title + (why ? '' : ' If this stays, keep this TIPS tab open (not asleep in the background) or use Sync now.') };
+    }
+    return { c: off ? '' : 'g', ...base };
   }
   function syncPill() {
     if (!loaded) return;

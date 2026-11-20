@@ -66,6 +66,17 @@ function clockChrome(state={documentsFolder:{configured:true,auto:true,pollMinut
    c.requests.length=0;e.messages.length=0;await e.tabs.get(1)({type:'library-poll'});await until(()=>e.messages.some(m=>m.action==='end'));await until(()=>!c.$('library_sync').disabled);assert.equal(c.requests.length,1,'unchanged folder only needs the recent search');
   }finally{c.close();}
  });
+ await test('an index folder that needs access again does not stop scheduled sync, and an overdue sync is not shown green',async()=>{
+  const e=await connected({auto:true}),c=await content(e,undefined,{section:'library'});
+  try{const folder={configured:true,folderName:'TIPs-Exporter-main',filename:'Progress_log_all_documents.csv',epoch:'x',phase:'permission',message:'Allow folder access in Settings to resume saving the index. Browser progress is retained.'};
+   await e.chrome.storage.local.set({indexFolder:folder});await tick(20);
+   assert.equal((await e.tabs.get(1)({type:'library-poll-status'})).ready,true,'index folder access must not block the scheduled library sync');
+   c.w.document.body.insertAdjacentHTML('beforeend','<vehicle-navbar><div class="navbar"></div></vehicle-navbar>');
+   const old={at:new Date(Date.now()-63*60000).toISOString(),fresh:0,updated:0};await e.chrome.storage.local.set({lastCheck:old});await tick(20);
+   const pill=c.w.document.querySelector('.tipsx-sync');
+   assert(pill,'sync indicator is shown');assert.equal(pill.dataset.kind,'a');assert.match(pill.textContent,/automatic sync overdue/);
+  }finally{c.close();}
+ });
  await test('expired sessions pause scheduled requests until a manual sync succeeds',async()=>{
   const e=await connected({auto:true});let expired=true;const c=await content(e,async(u,o)=>o?.method==='POST'&&expired?{ok:false,status:401}:null,{section:'library'});
   try{assert.equal((await e.tabs.get(1)({type:'library-poll'})).accepted,true);await until(()=>c.requests.length===1);await tick(60);
