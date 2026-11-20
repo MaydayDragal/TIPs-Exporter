@@ -5,7 +5,7 @@ async function test(name,fn){let timer;try{await Promise.race([fn(),new Promise(
 function event(){const listeners=[];return {addListener:fn=>listeners.push(fn),fire:async(...args)=>Promise.all(listeners.map(fn=>fn(...args))),listeners};}
 function clockChrome(state={documentsFolder:{configured:true,auto:true,pollMinutes:10}}){
  let time=Date.now(),alarm,creates=0; const messages=[],tabs=[{id:1,url:'https://xentry.mercedes-benz.com/tips-reader/search/topics'}],handlers=new Map([[1,async m=>m.type==='library-poll-status'?{ready:true,busy:false}:{accepted:true}]]);
- const c={runtime:{id:'test-extension',onMessage:event(),onStartup:event(),onInstalled:event()},storage:{local:{get:async keys=>Object.fromEntries(keys.map(k=>[k,state[k]]))},onChanged:event()},
+ const c={runtime:{id:'test-extension',onMessage:event(),onStartup:event(),onInstalled:event()},storage:{local:{get:async keys=>Object.fromEntries(keys.map(k=>[k,state[k]])),set:async o=>{Object.assign(state,o);}},onChanged:event()},
   alarms:{get:async()=>alarm,clear:async()=>{alarm=undefined;},create:async(name,info)=>{creates++;alarm={name,...info,scheduledTime:info.when??time+info.delayInMinutes*60000};},onAlarm:event()},
   tabs:{query:async()=>tabs,sendMessage:async(id,m)=>{messages.push({id,...m});return handlers.get(id)(m);}}};
  const folder={handle:{queryPermission:async()=> 'granted'}},db={get:async k=>k==='documentsConnection'?folder:null};
@@ -66,6 +66,19 @@ function clockChrome(state={documentsFolder:{configured:true,auto:true,pollMinut
    c.requests.length=0;e.messages.length=0;await e.tabs.get(1)({type:'library-poll'});await until(()=>e.messages.some(m=>m.action==='end'));await until(()=>!c.$('library_sync').disabled);assert.equal(c.requests.length,1,'unchanged folder only needs the recent search');
   }finally{c.close();}
  });
+ await test('an index folder that needs access again does not stop scheduled sync, and an overdue sync is not shown green',async()=>{
+  const e=await connected({auto:true}),c=await content(e,undefined,{section:'library'});
+  try{const folder={configured:true,folderName:'TIPs-Exporter-main',filename:'Progress_log_all_documents.csv',epoch:'x',phase:'permission',message:'Allow folder access in Settings to resume saving the index. Browser progress is retained.'};
+   await e.chrome.storage.local.set({indexFolder:folder});await tick(20);
+   assert.equal((await e.tabs.get(1)({type:'library-poll-status'})).ready,true,'index folder access must not block the scheduled library sync');
+   c.$('tolibrary')?.click();assert(c.$('library_grant'),'Library offers a one-click Allow folder access');assert.match(c.$('library_panel').textContent,/Allow on every visit/);
+   e.messages.length=0;c.$('library_grant').click();await until(()=>e.messages.some(m=>m.action==='grant'));
+   c.w.document.body.insertAdjacentHTML('beforeend','<vehicle-navbar><div class="navbar"></div></vehicle-navbar>');
+   const old={at:new Date(Date.now()-63*60000).toISOString(),fresh:0,updated:0};await e.chrome.storage.local.set({lastCheck:old});await tick(20);
+   const pill=c.w.document.querySelector('.tipsx-sync');
+   assert(pill,'sync indicator is shown');assert.equal(pill.dataset.kind,'a');assert.match(pill.textContent,/automatic sync overdue/);
+  }finally{c.close();}
+ });
  await test('expired sessions pause scheduled requests until a manual sync succeeds',async()=>{
   const e=await connected({auto:true});let expired=true;const c=await content(e,async(u,o)=>o?.method==='POST'&&expired?{ok:false,status:401}:null,{section:'library'});
   try{assert.equal((await e.tabs.get(1)({type:'library-poll'})).accepted,true);await until(()=>c.requests.length===1);await tick(60);
@@ -87,6 +100,24 @@ function clockChrome(state={documentsFolder:{configured:true,auto:true,pollMinut
   assert.equal((await e.send('set-interval',{minutes:1},'hostile')).ok,false);
   for(const minutes of [0,-1,1.5,1441,'2'])assert.equal((await e.send('set-interval',{minutes})).ok,false);
   assert.deepEqual((await e.db.get('documentsStatus')).summary,previous.summary);assert.equal((await e.send('set-interval',{minutes:2})).ok,true);
+ });
+ await test('each timer check records why it did or did not sync, and skips sleeping tabs',async()=>{
+  const e=clockChrome(),p=require(modulePath).create({chrome:e.c,db:e.db,now:e.now});
+  await p.tick();assert.equal(e.state.pollLast.outcome,'dispatched');
+  e.tabs[0].frozen=true;e.messages.length=0;await p.tick();assert.equal(e.state.pollLast.outcome,'asleep');assert.equal(e.messages.length,0,'a frozen tab is not messaged');
+  e.tabs[0].frozen=false;e.handlers.set(1,async()=>({ready:false,busy:false}));await p.tick();assert.equal(e.state.pollLast.outcome,'not-ready');
+  e.tabs.length=0;await p.tick();assert.equal(e.state.pollLast.outcome,'no-tab');
+  e.db.get=async()=>({handle:{queryPermission:async()=> 'prompt'}});await p.tick();assert.equal(e.state.pollLast.outcome,'no-access');
+ });
+ await test('a TIPS tab that comes back from the background catches up an overdue sync and the indicator gives a reason',async()=>{
+  const e=await connected({auto:true}),c=await content(e,undefined,{section:'library'});
+  try{c.w.document.body.insertAdjacentHTML('beforeend','<vehicle-navbar><div class="navbar"></div></vehicle-navbar>');
+   await e.chrome.storage.local.set({lastCheck:{at:new Date(Date.now()-49*60000).toISOString(),fresh:0,updated:0},pollLast:{at:new Date(Date.now()-5*60000).toISOString(),outcome:'asleep'}});await tick(20);
+   const pill=c.w.document.querySelector('.tipsx-sync');assert.match(pill.textContent,/overdue \(Chrome put this tab to sleep/);
+   c.requests.length=0;c.w.document.dispatchEvent(new c.w.Event('visibilitychange'));
+   await until(()=>c.requests.some(u=>u.includes('/search')));await until(()=>Date.now()-Date.parse(e.state.lastCheck.at)<60000);
+   await until(()=>!c.$('library_sync').disabled);
+  }finally{c.close();}
  });
  await test('simultaneous timer events do not dispatch overlapping checks',async()=>{
   const e=clockChrome(),p=require(modulePath).create({chrome:e.c,db:e.db,now:e.now});let release;

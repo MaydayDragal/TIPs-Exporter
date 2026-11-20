@@ -1,0 +1,11 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Allow folder access · TIPS Exporter</title><link rel="stylesheet" href="folder-settings.css">
+<style>main{margin:20px auto;max-width:440px}h1{font-size:22px}#grant{width:100%;padding:14px;font-size:16px}.tip{background:#fff6dd;color:#5a4300;border-radius:8px;padding:10px 12px}@media(prefers-color-scheme:dark){.tip{background:#3a3220;color:#f4dc9c}}</style></head>
+<body><main>
+  <h1>Allow folder access</h1>
+  <p id="what">Checking which folders need access…</p>
+  <p class="tip">When Chrome asks, choose <b>Allow on every visit</b>. Then Chrome won't ask again after a restart.</p>
+  <button id="grant" class="primary" disabled>Allow access</button>
+  <p id="result" role="status" aria-live="polite"></p>
+</main><script src="folder-db.js"></script><script src="grant.js"></script></body></html>

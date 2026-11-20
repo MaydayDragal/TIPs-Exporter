@@ -61,6 +61,7 @@
     S.history = await store.get('history', []);
     S.recent = await store.get('recent', []);
     S.lastCheck = await store.get('lastCheck', null);
+    S.pollLast = await store.get('pollLast', null);
     S.retry = await store.get('retry', {});
     const saved = await store.get('settings', {});
     // Adopt the example's PDFs/attachments-only default once. Preserve custom file selections and
@@ -528,9 +529,43 @@
     const checked = await refreshIndex(false, false, false);
     if (checked) await updateDocuments({ includeMissing: S.settings.libraryIncludeMissing });
   }
+  // Why a scheduled sync would not run in this tab right now ('' = it can run). An index folder problem
+  // (for example access that Chrome reset after a restart) does not stop it: progress is kept in Chrome
+  // and written to the folder once access returns, exactly as for the sync that runs when TIPS opens.
+  // Blocking on it made automatic sync stop silently after that first sync.
+  function pollBlockReason() {
+    if (!S.documents.configured) return 'no library folder';
+    if (!S.documents.auto) return 'automatic sync off';
+    if (!S.index.length) return 'no index';
+    if (S.sessionExpired || !sessionOK()) return 'log in to TIPS again';
+    if (navigator.onLine === false) return 'offline';
+    return '';
+  }
+  // What the background timer last found, when that was after the last sync.
+  const POLL_OUTCOMES = { 'no-access': 'documents folder needs access – click Allow folder access', 'no-tab': 'no TIPS tab was open',
+    asleep: 'Chrome put this tab to sleep in the background', busy: 'another download or scan was running', 'not-ready': 'TIPS was not ready', declined: 'TIPS was busy' };
+  function pollOutcomeReason(lc) {
+    const p = S.pollLast;
+    if (!p || !(Date.parse(p.at) > Date.parse(lc?.at))) return 'the background timer has not run';
+    return POLL_OUTCOMES[p.outcome] || '';
+  }
+  // A sleeping (frozen/discarded) background tab misses the timer. When it is shown or resumes, catch up at once
+  // through the same coordinated path as the sync when TIPS opens.
+  let catchingUp = false;
+  async function catchUpSync() {
+    if (catchingUp || !loaded || !readyForPolling || document.visibilityState === 'hidden') return;
+    const d = S.documents || {}, at = Date.parse(S.lastCheck?.at);
+    const period = (Number.isInteger(d.pollMinutes) ? d.pollMinutes : 10) * 60000;
+    if (!d.configured || !d.auto || !pollingStatus().ready || (Number.isFinite(at) && Date.now() - at < period)) return;
+    catchingUp = true;
+    try {
+      try { const result = await chrome.runtime.sendMessage({ type: 'library-poll-startup' }); if (result?.handled) return; } catch (_) {}
+      if (pollingStatus().ready) await scheduledLibrarySync();
+    } finally { catchingUp = false; }
+  }
   function pollingStatus() {
     const occupied = !readyForPolling || busy() || S.checking || !!persisting || S.single?.phase === 'looking' || !!pick;
-    return { busy: occupied, ready: !occupied && !!(S.documents.configured && S.documents.auto && S.index.length && sessionOK() && !S.sessionExpired && !folderProblem() && navigator.onLine !== false) };
+    return { busy: occupied, ready: !occupied && !pollBlockReason() };
   }
   async function scheduledLibrarySync() {
     clearTimeout(documentsTimer);
@@ -653,10 +688,20 @@
 
   // ---------------------------------------------------------------- shared index folder
   const folderProblem = () => S.folder.configured && S.folder.phase !== 'saved';
+  // Read-only requests are retried once: a closed channel usually means Chrome stopped and restarted
+  // the extension worker mid-request, and the second attempt reaches the fresh worker. Saves are not
+  // retried, because the first attempt may already have written.
+  const RETRY_FOLDER_ACTIONS = ['load', 'status', 'open'];
   async function folderRequest(action, extra = {}) {
     if (!hasChrome || !chrome.runtime?.sendMessage) return null;
     try {
-      const r = await chrome.runtime.sendMessage({ type: 'index-folder', action, ...extra });
+      let r;
+      try { r = await chrome.runtime.sendMessage({ type: 'index-folder', action, ...extra }); }
+      catch (e) {
+        if (!RETRY_FOLDER_ACTIONS.includes(action) || /context invalidated/i.test(e.message || '')) throw e;
+        await sleep(500);
+        r = await chrome.runtime.sendMessage({ type: 'index-folder', action, ...extra });
+      }
       if (!r) throw Error('The index service did not respond. Reload the extension and TIPS tab.');
       if (r.status) S.folder = r.status;
       else if (!r.ok) S.folder = { ...S.folder, phase: 'error', message: r.error };
@@ -665,6 +710,22 @@
       S.folder = { ...S.folder, phase: 'error', message: 'Index folder unavailable: ' + e.message };
       return { ok: false, transport: true, error: S.folder.message };
     }
+  }
+  // The extension worker locks this tab while it changes or reloads the index folder and unlocks it
+  // afterwards. If the worker is stopped in between (Chrome ends idle or long-running workers), the
+  // unlock never arrives; without a lease the tab stayed busy until reloaded, graying out Sync,
+  // Scan and Folder settings. Folder operations finish in seconds, so a stale lock expires.
+  const FOLDER_LOCK_LEASE_MS = globalThis.TIPSFolderLockLeaseMs || 90000;
+  let folderLockTimer = null;
+  function armFolderLockLease(token) {
+    clearTimeout(folderLockTimer);
+    folderLockTimer = setTimeout(() => { if (S.folderLock === token) releaseFolderLock(token).catch(() => {}); }, FOLDER_LOCK_LEASE_MS);
+  }
+  async function releaseFolderLock(token) {
+    if (S.folderLock !== token) return;
+    clearTimeout(folderLockTimer); folderLockTimer = null;
+    try { await reloadProgress(); }
+    finally { if (S.folderLock === token) { S.folderLock = null; render(); } }
   }
   async function reloadProgress() {
     if (!loaded) return;
@@ -693,6 +754,14 @@
   function folderDetails() {
     const f = S.folder;
     return f.configured ? `${f.folderName} / ${f.filename}` : 'No folder selected — progress is saved in Chrome';
+  }
+  // Chrome resets folder access when the browser restarts (and when its last extension page closes, unless
+  // "Allow on every visit" was chosen). Only a click on an extension page can renew it.
+  const needsFolderAccess = () => (S.folder.configured && S.folder.phase === 'permission') || (S.documents?.configured && S.documents.phase === 'permission') ||
+    (S.documents?.configured && S.pollLast?.outcome === 'no-access' && !(Date.parse(S.lastCheck?.at) > Date.parse(S.pollLast.at)));
+  async function openFolderGrant() {
+    let r; try { r = await chrome.runtime.sendMessage({ type: 'index-folder', action: 'grant' }); } catch (_) {}
+    if (!r?.ok) await openFolderSettings();
   }
   async function openFolderSettings() {
     const r = await folderRequest('open');
@@ -1172,7 +1241,15 @@
     if (!lc || !Number.isFinite(Date.parse(lc.at))) return { c: '', t: 'TIPS Exporter · not synced yet' };
     const news = lc.fresh || lc.updated ? `${lc.fresh || 0} new, ${lc.updated || 0} updated` : 'nothing new';
     const off = !d.configured ? ' · no library folder' : !d.auto ? ' · automatic sync off' : '';
-    return { c: off ? '' : 'g', t: `Last sync ${when(lc.at)} (${ago(lc.at)}) · ${news}${off}`, title: 'Last check of TIPS: ' + new Date(lc.at).toLocaleString() + '. Click to open TIPS Exporter.' };
+    const base = { t: `Last sync ${when(lc.at)} (${ago(lc.at)}) · ${news}${off}`, title: 'Last check of TIPS: ' + new Date(lc.at).toLocaleString() + '. Click to open TIPS Exporter.' };
+    // Do not show green when automatic sync is on but has missed two intervals: say so, with the reason when known.
+    const period = (Number.isInteger(d.pollMinutes) ? d.pollMinutes : 10) * 60000;
+    if (!off && Date.now() - Date.parse(lc.at) > 2 * period + 60000) {
+      const why = pollBlockReason() || pollOutcomeReason(lc);
+      return { c: 'a', t: base.t + ' · automatic sync overdue' + (why ? ' (' + why + ')' : ''),
+        title: base.title + (why ? '' : ' If this stays, keep this TIPS tab open (not asleep in the background) or use Sync now.') };
+    }
+    return { c: off ? '' : 'g', ...base };
   }
   function syncPill() {
     if (!loaded) return;
@@ -1465,7 +1542,7 @@
       <span class="mut sm">Document revision dates are kept. Older saved files are preserved.</span>
       <div class="card"><div class="bd"><b>Documents folder</b><span class="mut sm">${esc(s.configured ? s.folderName + ' / [LI folder] / ' + s.attachmentFolder : 'Choose the parent folder containing your saved LIs.')}</span>
         <b>Index log</b><span class="mut sm">${esc(folderDetails())}</span></div></div>
-      <button class="b bar" id="library_folders" ${disabled ? 'disabled' : ''}>Folder settings</button>
+      <button class="b bar" id="library_folders">Folder settings</button>
       <label class="ck"><input type="checkbox" id="library_auto" ${s.auto ? 'checked' : ''} ${disabled || !s.configured ? 'disabled' : ''}> Automatically sync</label>
       <span class="mut sm">Check when TIPS opens, then every ${s.pollMinutes ?? 10} minutes while TIPS remains open. Change the interval in Settings.</span>
       ${S.sessionExpired ? '<span class="alc sm">Automatic checks paused until you log in again and reload this tab or use Sync now.</span>' : ''}
@@ -1475,6 +1552,7 @@
       <span class="mut sm">Sync checks recent index changes, then downloads only changed or missing files. TIPS must be open and logged in.</span>
       ${!S.index.length ? '<span class="alc sm">Select your existing index in Folder settings. To start a new catalogue, use Advanced → Bulk export → Build index.</span>' : `<span class="mut sm">${fmtN(S.index.length)} indexed documents${S.lastCheck ? ' · Last check ' + esc(when(S.lastCheck.at)) : ''}</span>`}
       ${folderProblem() ? `<span class="alc sm">${esc(S.folder.message || 'Index synchronization needs attention. Open Folder settings.')}</span>` : ''}
+      ${needsFolderAccess() ? `<button class="b pri" id="library_grant">Allow folder access</button><span class="mut sm">Opens a small window. When Chrome asks, choose “Allow on every visit” so it doesn’t ask again after a restart.</span>` : ''}
       ${S.run || S.pending || S.resume ? '<div class="card"><span>A manual ZIP export needs attention.</span><button class="b bar sm" id="library_export">Open Advanced</button></div>' : ''}
       </div>${vDocuments()}`;
   }
@@ -1693,6 +1771,7 @@
     on('tosingle', 'onclick', () => { section = 'advanced'; view = 'single'; showSettings = false; render(); });
     on('library_sync', 'onclick', safeRun(syncLibrary));
     on('library_folders', 'onclick', openFolderSettings);
+    on('library_grant', 'onclick', openFolderGrant);
     on('library_auto', 'onchange', safeRun(async () => { await documentsRequest('set-auto', { auto: $('library_auto').checked }); render(); }));
     on('library_missing', 'onchange', async e => { s.libraryIncludeMissing = e.target.checked; await saveSettings(); });
     on('library_refresh', 'onchange', async e => { s.autoRefreshPage = e.target.checked; await saveSettings(); if (!s.autoRefreshPage) tryPageRefresh(); });
@@ -2251,11 +2330,11 @@
       if (m?.type === 'documents-folder-active') { reply({ active: S.documentRun?.token === m.token }); return; }
       if (m?.type === 'index-folder-lock') {
         if (busy() || S.checking || persisting || S.single?.phase === 'looking') { reply({ locked: false }); return; }
-        S.folderLock = m.token; render(); reply({ locked: true }); return;
+        S.folderLock = m.token; armFolderLockLease(m.token); render(); reply({ locked: true }); return;
       }
       if (m?.type === 'index-folder-unlock') {
         if (S.folderLock !== m.token) { reply(true); return; }
-        reloadProgress().then(() => { S.folderLock = null; render(); reply(true); }, () => { S.folderLock = null; reply(false); });
+        releaseFolderLock(m.token).then(() => reply(true), () => reply(false));
         return true;
       }
       if (m && m.type === 'toggle') openDrawer(!visible);
@@ -2265,6 +2344,7 @@
       if (area !== 'local') return;
       if (changes.indexFolder) S.folder = changes.indexFolder.newValue || { configured: false, epoch: null };
       if (changes.lastCheck && !S.checking) { S.lastCheck = changes.lastCheck.newValue || null; syncPill(); }
+      if (changes.pollLast) { S.pollLast = changes.pollLast.newValue || null; syncPill(); }
       if (changes.documentsFolder && !S.documentRun && ['saved', 'error'].includes(changes.documentsFolder.newValue?.phase) && changes.documentsFolder.oldValue?.phase === 'running') setTimeout(pageRefreshWanted, 2000);
       if (changes.documentsFolder) {
         const next = changes.documentsFolder.newValue || { configured: false };
@@ -2280,6 +2360,12 @@
   if (!hasChrome) window.__TIPSX_DEBUG = { pageRefreshWanted, syncPill, S, importLog, refreshIndex, showNotice, prepareBatch, approve, discard, render, progressCsv, nextBatch, lookupSpecific, downloadFound, downloadOpenTopic };
 
   document.documentElement.appendChild(host);
+  if (hasChrome && chrome.runtime?.sendMessage) {
+    const later = () => setTimeout(() => catchUpSync().catch(e => console.warn('TIPS Exporter: catch-up sync', e.message)), 1500);
+    document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') later(); });
+    document.addEventListener('resume', later);   // Page Lifecycle: the tab was unfrozen
+    window.addEventListener('online', later);
+  }
   load().then(async () => { await restoreKept(); if (!S.settings.user) await detectUserFallback(); await saveSettings(); readyForPolling = true; render(); autoCheckOnLoad(); });
   // Every time TIPS is opened, reloaded or refreshed (this script runs once per page load): quick "Check new" once the
   // session is known. One search request in the usual case; silent unless something new or updated turns up, which
