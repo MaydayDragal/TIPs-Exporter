@@ -31,7 +31,7 @@ function worker() {
       set: async o => { const c = {}; for (const k of Object.keys(o)) c[k] = { oldValue: state[k], newValue: o[k] }; Object.assign(state, structuredClone(o)); changes.forEach(fn => fn(c, 'local')); } }, onChanged: { addListener(fn) { changes.push(fn); } } },
     tabs: { query: async () => [{ id: 1 }], sendMessage: async (id, m) => { if (m.type === 'index-folder-lock') { locks++; return { locked: !busy }; } releases++; return true; } }
   };
-  const context = { chrome, TIPSFolderDB: db, TIPSIndexCsv: CSV, TIPSIndexFolder: Repo, console, crypto: require('node:crypto').webcrypto, setTimeout, clearTimeout };
+  const context = { chrome, TIPSLockReplyMs: 50, TIPSFolderDB: db, TIPSIndexCsv: CSV, TIPSIndexFolder: Repo, console, crypto: require('node:crypto').webcrypto, setTimeout, clearTimeout };
   vm.runInNewContext(fs.readFileSync(path.join(ROOT, 'index-background.js'), 'utf8'), context);
   const sender = kind => ({ id: chrome.runtime.id, url: kind === 'options' ? chrome.runtime.getURL('folder-settings.html') : kind === 'hostile' ? 'https://evil.test/' : 'https://xentry.mercedes-benz.com/tips-reader/search/topics', tab: { id: 1 } });
   async function send(action, payload = {}, kind = 'options') {
@@ -48,6 +48,16 @@ async function test(name, fn) { try { await fn(); console.log('PASS ' + name); }
     e.setBusy(true); assert.equal((await e.send('connect', { token: 'one' })).ok, false); assert.equal(e.state.index.length, 0);
     e.setBusy(false); await e.db.put('candidate:two', { handle: d, filename: FILE });
     assert((await e.send('connect', { token: 'two' })).ok); assert.equal(e.state.index[0].tips, ITEM.tips); assert(e.counters().releases > 0);
+  });
+  await test('a TIPS tab that never answers the lock does not hang the request or leave a lock behind', async () => {
+    const e = worker(), d = dir(CSV.stringify([ITEM], {})); await e.db.put('candidate:one', { handle: d, filename: FILE });
+    const sent = [];
+    e.chrome.tabs.query = async () => [{ id: 1 }, { id: 2 }];
+    e.chrome.tabs.sendMessage = (id, m) => { sent.push([id, m.type]); return id === 2 && m.type === 'index-folder-lock' ? new Promise(() => {}) : Promise.resolve(m.type === 'index-folder-lock' ? { locked: true } : true); };
+    const r = await e.send('connect', { token: 'one' });
+    assert(r.ok, 'connect completes although tab 2 is frozen');
+    assert.deepEqual(sent.filter(x => x[1] === 'index-folder-unlock').map(x => x[0]).sort(), [1, 2], 'every asked tab, including the silent one, is unlocked');
+    assert((await e.send('load')).ok, 'load also completes');
   });
   await test('folder Settings picks a directory, edits the filename, persists the handle and renews access', async () => {
     const e = worker(), d = dir(), dom = new JSDOM(fs.readFileSync(path.join(ROOT, 'folder-settings.html'), 'utf8'), {
@@ -116,6 +126,28 @@ async function test(name, fn) { try { await fn(); console.log('PASS ' + name); }
     db.close(); dom.window.close();
     assert(wasBlocked, 'Changing the index folder must be refused until approval has fully committed');
     assert.equal(after.locked, true, 'The approval guard must be released after committing');
+  });
+  await test('a lock whose unlock never arrives expires, and Folder settings stays clickable meanwhile', async () => {
+    const e = worker(), d = dir(CSV.stringify([ITEM], {}));
+    await e.db.put('candidate:one', { handle: d, filename: FILE }); assert((await e.send('connect', { token: 'one' })).ok);
+    const dom = new JSDOM('<!doctype html><body>TIPS Reader v1.22.0 - 2026</body>', { url: 'https://xentry.mercedes-benz.com/tips-reader/search/topics', runScripts: 'outside-only', pretendToBeVisual: true });
+    const w = dom.window; Object.assign(w, { TextEncoder, TextDecoder, Blob, indexedDB: new IDBFactory(), TIPSFolderLockLeaseMs: 200 });
+    w.chrome = { storage: e.chrome.storage, runtime: { ...e.chrome.runtime, sendMessage: msg => e.send(msg.action, msg, 'reader'), onMessage: { addListener(fn) { w.listener = fn; } } } };
+    require('./helpers/pdf-fixture').installPdfFixtures(w);
+    w.eval(fs.readFileSync(path.join(ROOT, 'index-csv.js'), 'utf8')); w.eval(fs.readFileSync(path.join(ROOT, 'content.js'), 'utf8'));
+    await tick(100); w.listener({ type: 'toggle' }, null, () => {});
+    const root = () => [...w.document.documentElement.children].find(n => n.shadowRoot)?.shadowRoot, $ = id => root()?.getElementById(id);
+    await until(() => $('library_folders'));
+    let first; w.listener({ type: 'index-folder-lock', token: 'orphan' }, null, r => { first = r; });
+    assert.equal(first.locked, true);
+    let blocked; w.listener({ type: 'index-folder-lock', token: 'second' }, null, r => { blocked = r; });
+    assert.equal(blocked.locked, false, 'the tab is busy while locked');
+    assert.equal($('library_folders').disabled, false, 'Folder settings remains clickable while locked');
+    await tick(400);
+    let again; w.listener({ type: 'index-folder-lock', token: 'third' }, null, r => { again = r; });
+    assert.equal(again.locked, true, 'the orphaned lock expired');
+    await new Promise(resolve => w.listener({ type: 'index-folder-unlock', token: 'third' }, null, resolve));
+    w.requestAnimationFrame = () => 0; await tick(100); dom.window.close();
   });
   await test('folder changes stay blocked while a manual progress CSV is being read', async () => {
     const e = worker(), d = dir(CSV.stringify([ITEM], {}));

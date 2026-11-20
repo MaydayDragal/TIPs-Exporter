@@ -10,20 +10,33 @@
     writeStatus: s => chrome.storage.local.set({ indexFolder: s })
   });
   // A source switch must not take place underneath a running/prepared/interrupted export.
+  // Every tab message is bounded: a frozen or hung TIPS tab never answers, and an unanswered
+  // tabs.sendMessage would keep this request open until Chrome stops the worker. That closed the
+  // caller's message channel and left the asking tab locked (Folder settings grayed out) for good.
+  const LOCK_REPLY_MS = globalThis.TIPSLockReplyMs || 10000;   // well under the 30 s idle limit after which Chrome stops the worker
+  async function ask(id, message) {
+    let timeout;
+    try { return await Promise.race([chrome.tabs.sendMessage(id, message), new Promise(resolve => { timeout = setTimeout(() => resolve({ timedOut: true }), LOCK_REPLY_MS); })]); }
+    finally { clearTimeout(timeout); }
+  }
   async function withIdleTabs(fn, label = 'index folder') {
-    const locked = [], token = crypto.randomUUID();
+    const asked = [], token = crypto.randomUUID();
     try {
       const tabs = await chrome.tabs.query({ url: 'https://xentry.mercedes-benz.com/tips-reader/*' });
       for (const tab of tabs) {
         let result;
-        try { result = await chrome.tabs.sendMessage(tab.id, { type: 'index-folder-lock', token }); }
+        try { result = await ask(tab.id, { type: 'index-folder-lock', token }); }
         catch (_) { continue; } // tab has no exporter content script yet
+        asked.push(tab.id);
+        // A frozen/suspended tab cannot run an export while it does not answer; its late lock is released below.
+        if (result?.timedOut) continue;
         if (!result || result.locked !== true) throw Error(`Finish or discard the current export/check before changing or reloading the ${label}. Reload older TIPS tabs after updating the extension.`);
-        locked.push(tab.id);
       }
       return await fn();
     } finally {
-      await Promise.allSettled(locked.map(id => chrome.tabs.sendMessage(id, { type: 'index-folder-unlock', token })));
+      // Unlock every tab that was asked, including one whose lock reply was late. An unlock with
+      // another token is ignored by the tab, so this never releases someone else's lock.
+      await Promise.allSettled(asked.map(id => ask(id, { type: 'index-folder-unlock', token })));
     }
   }
   globalThis.TIPSWithIdleTabs = withIdleTabs;

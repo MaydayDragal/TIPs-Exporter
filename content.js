@@ -653,10 +653,20 @@
 
   // ---------------------------------------------------------------- shared index folder
   const folderProblem = () => S.folder.configured && S.folder.phase !== 'saved';
+  // Read-only requests are retried once: a closed channel usually means Chrome stopped and restarted
+  // the extension worker mid-request, and the second attempt reaches the fresh worker. Saves are not
+  // retried, because the first attempt may already have written.
+  const RETRY_FOLDER_ACTIONS = ['load', 'status', 'open'];
   async function folderRequest(action, extra = {}) {
     if (!hasChrome || !chrome.runtime?.sendMessage) return null;
     try {
-      const r = await chrome.runtime.sendMessage({ type: 'index-folder', action, ...extra });
+      let r;
+      try { r = await chrome.runtime.sendMessage({ type: 'index-folder', action, ...extra }); }
+      catch (e) {
+        if (!RETRY_FOLDER_ACTIONS.includes(action) || /context invalidated/i.test(e.message || '')) throw e;
+        await sleep(500);
+        r = await chrome.runtime.sendMessage({ type: 'index-folder', action, ...extra });
+      }
       if (!r) throw Error('The index service did not respond. Reload the extension and TIPS tab.');
       if (r.status) S.folder = r.status;
       else if (!r.ok) S.folder = { ...S.folder, phase: 'error', message: r.error };
@@ -665,6 +675,22 @@
       S.folder = { ...S.folder, phase: 'error', message: 'Index folder unavailable: ' + e.message };
       return { ok: false, transport: true, error: S.folder.message };
     }
+  }
+  // The extension worker locks this tab while it changes or reloads the index folder and unlocks it
+  // afterwards. If the worker is stopped in between (Chrome ends idle or long-running workers), the
+  // unlock never arrives; without a lease the tab stayed busy until reloaded, graying out Sync,
+  // Scan and Folder settings. Folder operations finish in seconds, so a stale lock expires.
+  const FOLDER_LOCK_LEASE_MS = globalThis.TIPSFolderLockLeaseMs || 90000;
+  let folderLockTimer = null;
+  function armFolderLockLease(token) {
+    clearTimeout(folderLockTimer);
+    folderLockTimer = setTimeout(() => { if (S.folderLock === token) releaseFolderLock(token).catch(() => {}); }, FOLDER_LOCK_LEASE_MS);
+  }
+  async function releaseFolderLock(token) {
+    if (S.folderLock !== token) return;
+    clearTimeout(folderLockTimer); folderLockTimer = null;
+    try { await reloadProgress(); }
+    finally { if (S.folderLock === token) { S.folderLock = null; render(); } }
   }
   async function reloadProgress() {
     if (!loaded) return;
@@ -1465,7 +1491,7 @@
       <span class="mut sm">Document revision dates are kept. Older saved files are preserved.</span>
       <div class="card"><div class="bd"><b>Documents folder</b><span class="mut sm">${esc(s.configured ? s.folderName + ' / [LI folder] / ' + s.attachmentFolder : 'Choose the parent folder containing your saved LIs.')}</span>
         <b>Index log</b><span class="mut sm">${esc(folderDetails())}</span></div></div>
-      <button class="b bar" id="library_folders" ${disabled ? 'disabled' : ''}>Folder settings</button>
+      <button class="b bar" id="library_folders">Folder settings</button>
       <label class="ck"><input type="checkbox" id="library_auto" ${s.auto ? 'checked' : ''} ${disabled || !s.configured ? 'disabled' : ''}> Automatically sync</label>
       <span class="mut sm">Check when TIPS opens, then every ${s.pollMinutes ?? 10} minutes while TIPS remains open. Change the interval in Settings.</span>
       ${S.sessionExpired ? '<span class="alc sm">Automatic checks paused until you log in again and reload this tab or use Sync now.</span>' : ''}
@@ -2251,11 +2277,11 @@
       if (m?.type === 'documents-folder-active') { reply({ active: S.documentRun?.token === m.token }); return; }
       if (m?.type === 'index-folder-lock') {
         if (busy() || S.checking || persisting || S.single?.phase === 'looking') { reply({ locked: false }); return; }
-        S.folderLock = m.token; render(); reply({ locked: true }); return;
+        S.folderLock = m.token; armFolderLockLease(m.token); render(); reply({ locked: true }); return;
       }
       if (m?.type === 'index-folder-unlock') {
         if (S.folderLock !== m.token) { reply(true); return; }
-        reloadProgress().then(() => { S.folderLock = null; render(); reply(true); }, () => { S.folderLock = null; reply(false); });
+        releaseFolderLock(m.token).then(() => reply(true), () => reply(false));
         return true;
       }
       if (m && m.type === 'toggle') openDrawer(!visible);
