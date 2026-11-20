@@ -542,7 +542,7 @@
     return '';
   }
   // What the background timer last found, when that was after the last sync.
-  const POLL_OUTCOMES = { 'no-access': 'documents folder needs access – open Folder settings', 'no-tab': 'no TIPS tab was open',
+  const POLL_OUTCOMES = { 'no-access': 'documents folder needs access – click Allow folder access', 'no-tab': 'no TIPS tab was open',
     asleep: 'Chrome put this tab to sleep in the background', busy: 'another download or scan was running', 'not-ready': 'TIPS was not ready', declined: 'TIPS was busy' };
   function pollOutcomeReason(lc) {
     const p = S.pollLast;
@@ -754,6 +754,14 @@
   function folderDetails() {
     const f = S.folder;
     return f.configured ? `${f.folderName} / ${f.filename}` : 'No folder selected — progress is saved in Chrome';
+  }
+  // Chrome resets folder access when the browser restarts (and when its last extension page closes, unless
+  // "Allow on every visit" was chosen). Only a click on an extension page can renew it.
+  const needsFolderAccess = () => (S.folder.configured && S.folder.phase === 'permission') || (S.documents?.configured && S.documents.phase === 'permission') ||
+    (S.documents?.configured && S.pollLast?.outcome === 'no-access' && !(Date.parse(S.lastCheck?.at) > Date.parse(S.pollLast.at)));
+  async function openFolderGrant() {
+    let r; try { r = await chrome.runtime.sendMessage({ type: 'index-folder', action: 'grant' }); } catch (_) {}
+    if (!r?.ok) await openFolderSettings();
   }
   async function openFolderSettings() {
     const r = await folderRequest('open');
@@ -1544,6 +1552,7 @@
       <span class="mut sm">Sync checks recent index changes, then downloads only changed or missing files. TIPS must be open and logged in.</span>
       ${!S.index.length ? '<span class="alc sm">Select your existing index in Folder settings. To start a new catalogue, use Advanced → Bulk export → Build index.</span>' : `<span class="mut sm">${fmtN(S.index.length)} indexed documents${S.lastCheck ? ' · Last check ' + esc(when(S.lastCheck.at)) : ''}</span>`}
       ${folderProblem() ? `<span class="alc sm">${esc(S.folder.message || 'Index synchronization needs attention. Open Folder settings.')}</span>` : ''}
+      ${needsFolderAccess() ? `<button class="b pri" id="library_grant">Allow folder access</button><span class="mut sm">Opens a small window. When Chrome asks, choose “Allow on every visit” so it doesn’t ask again after a restart.</span>` : ''}
       ${S.run || S.pending || S.resume ? '<div class="card"><span>A manual ZIP export needs attention.</span><button class="b bar sm" id="library_export">Open Advanced</button></div>' : ''}
       </div>${vDocuments()}`;
   }
@@ -1762,6 +1771,7 @@
     on('tosingle', 'onclick', () => { section = 'advanced'; view = 'single'; showSettings = false; render(); });
     on('library_sync', 'onclick', safeRun(syncLibrary));
     on('library_folders', 'onclick', openFolderSettings);
+    on('library_grant', 'onclick', openFolderGrant);
     on('library_auto', 'onchange', safeRun(async () => { await documentsRequest('set-auto', { auto: $('library_auto').checked }); render(); }));
     on('library_missing', 'onchange', async e => { s.libraryIncludeMissing = e.target.checked; await saveSettings(); });
     on('library_refresh', 'onchange', async e => { s.autoRefreshPage = e.target.checked; await saveSettings(); if (!s.autoRefreshPage) tryPageRefresh(); });

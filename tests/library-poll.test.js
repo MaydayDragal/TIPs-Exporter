@@ -71,6 +71,8 @@ function clockChrome(state={documentsFolder:{configured:true,auto:true,pollMinut
   try{const folder={configured:true,folderName:'TIPs-Exporter-main',filename:'Progress_log_all_documents.csv',epoch:'x',phase:'permission',message:'Allow folder access in Settings to resume saving the index. Browser progress is retained.'};
    await e.chrome.storage.local.set({indexFolder:folder});await tick(20);
    assert.equal((await e.tabs.get(1)({type:'library-poll-status'})).ready,true,'index folder access must not block the scheduled library sync');
+   c.$('tolibrary')?.click();assert(c.$('library_grant'),'Library offers a one-click Allow folder access');assert.match(c.$('library_panel').textContent,/Allow on every visit/);
+   e.messages.length=0;c.$('library_grant').click();await until(()=>e.messages.some(m=>m.action==='grant'));
    c.w.document.body.insertAdjacentHTML('beforeend','<vehicle-navbar><div class="navbar"></div></vehicle-navbar>');
    const old={at:new Date(Date.now()-63*60000).toISOString(),fresh:0,updated:0};await e.chrome.storage.local.set({lastCheck:old});await tick(20);
    const pill=c.w.document.querySelector('.tipsx-sync');

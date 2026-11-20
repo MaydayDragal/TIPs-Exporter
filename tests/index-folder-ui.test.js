@@ -37,7 +37,7 @@ function worker() {
   async function send(action, payload = {}, kind = 'options') {
     return new Promise(resolve => { const keep = listener({ type: 'index-folder', action, ...payload }, sender(kind), resolve); if (!keep) resolve(undefined); });
   }
-  return { state, data, db, chrome, send, setBusy: v => { busy = v; }, counters: () => ({ opened, locks, releases }) };
+  return { state, data, db, chrome, send, listener: () => listener, setBusy: v => { busy = v; }, counters: () => ({ opened, locks, releases }) };
 }
 async function test(name, fn) { try { await fn(); console.log('PASS ' + name); } catch (e) { console.log('FAIL ' + name + ': ' + e.stack); process.exitCode = 1; } }
 (async () => {
@@ -62,6 +62,23 @@ async function test(name, fn) { try { await fn(); console.log('PASS ' + name); }
     e.chrome.tabs.query = async () => [{ id: 1 }];
     await e.db.put('candidate:two', { handle: d, filename: FILE });
     assert((await e.send('connect', { token: 'two' })).ok, 'connect works once the silent tab is gone');
+  });
+  await test('TIPS can open the one-click folder access window, and it renews both folders and resumes the index', async () => {
+    const e = worker(), d = dir(CSV.stringify([ITEM], {})), docs = dir(null);
+    await e.db.put('candidate:one', { handle: d, filename: FILE }); assert((await e.send('connect', { token: 'one' })).ok);
+    const windows = []; e.chrome.windows = { create: async o => { windows.push(o); } };
+    assert((await e.send('grant', {}, 'reader')).ok); assert.equal(windows.length, 1); assert.match(windows[0].url, /grant\.html$/);
+    d.permission = 'prompt'; docs.permission = 'prompt'; docs.name = 'LI Library'; await e.db.put('documentsConnection', { handle: docs });
+    const dom = new JSDOM(fs.readFileSync(path.join(ROOT, 'grant.html'), 'utf8'), { url: 'https://extension.test/', runScripts: 'outside-only' });
+    const w = dom.window, $ = id => w.document.getElementById(id); let closed = 0;
+    w.TIPSFolderDB = e.db; w.close = () => { closed++; };
+    w.chrome = { runtime: { sendMessage: m => new Promise(resolve => { const keep = e.listener()(m, { id: e.chrome.runtime.id, url: e.chrome.runtime.getURL('grant.html') }, resolve); if (!keep) resolve(undefined); }) } };
+    w.eval(fs.readFileSync(path.join(ROOT, 'grant.js'), 'utf8'));
+    await until(() => !$('grant').disabled); assert.match($('what').textContent, /index log folder.*documents folder/);
+    $('grant').click(); await until(() => d.requests === 1 && !$('grant').disabled);
+    $('grant').click(); await until(() => docs.requests === 1);
+    await until(() => /Access allowed/.test($('result').textContent)); assert.equal(e.state.indexFolder.phase, 'saved');
+    await until(() => closed === 1); dom.window.close();
   });
   await test('folder Settings picks a directory, edits the filename, persists the handle and renews access', async () => {
     const e = worker(), d = dir(), dom = new JSDOM(fs.readFileSync(path.join(ROOT, 'folder-settings.html'), 'utf8'), {

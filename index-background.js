@@ -44,11 +44,13 @@
   chrome.runtime.onMessage.addListener((m, sender, reply) => {
     if (!m || m.type !== 'index-folder') return;
     const own = sender?.id === chrome.runtime.id;
-    const options = own && sender.url === chrome.runtime.getURL('folder-settings.html');
+    const options = own && [chrome.runtime.getURL('folder-settings.html'), chrome.runtime.getURL('grant.html')].includes(sender.url);
     const reader = own && /^https:\/\/xentry\.mercedes-benz\.com\/tips-reader\//.test(sender.url || '');
     if (!options && !reader) { reply({ ok: false, error: 'This index request is not allowed.' }); return; }
     (async () => {
       if (m.action === 'open') { await chrome.runtime.openOptionsPage(); return { ok: true }; }
+      // Folder access must be renewed by a click on an extension page: open a small window for that one click.
+      if (m.action === 'grant') { await chrome.windows.create({ url: chrome.runtime.getURL('grant.html'), type: 'popup', width: 480, height: 400, focused: true }); return { ok: true }; }
       if (m.action === 'status') return { ok: true, status: (await chrome.storage.local.get('indexFolder')).indexFolder || await repo.status() };
       if (m.action === 'load') return withIdleTabs(() => repo.load());
       if (m.action === 'save' && reader) return repo.save(m.snapshot, m.epoch, m.base);

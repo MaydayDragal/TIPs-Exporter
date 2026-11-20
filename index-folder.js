@@ -23,7 +23,7 @@
       await deps.writeStatus(s); return s;
     }
     async function access(handle) {
-      if (await handle.queryPermission({ mode: 'readwrite' }) !== 'granted') throw Object.assign(Error('Allow folder access in Settings to resume saving the index. Browser progress is retained.'), { code: 'permission' });
+      if (await handle.queryPermission({ mode: 'readwrite' }) !== 'granted') throw Object.assign(Error('Chrome needs your OK to use the index folder again: click Allow folder access. Browser progress is retained.'), { code: 'permission' });
     }
     async function read(handle, name) {
       try {
@@ -40,7 +40,7 @@
     }
     async function failure(record, e) {
       const phase = e.code || (/NotAllowed|Security/.test(e.name || '') ? 'permission' : 'error');
-      const message = phase === 'permission' ? 'Allow folder access in Settings to resume saving the index. Browser progress is retained.' : e.message + ' Browser progress is retained.';
+      const message = phase === 'permission' ? 'Chrome needs your OK to use the index folder again: click Allow folder access. Browser progress is retained.' : e.message + ' Browser progress is retained.';
       return { ok: false, status: await status(record, phase, message) };
     }
     async function sync(record, allowRead) {

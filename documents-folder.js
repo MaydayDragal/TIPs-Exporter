@@ -72,7 +72,7 @@
         ...(previous.lastUpdated ? { lastUpdated: previous.lastUpdated } : {})
       });
     }
-    async function access(r) { if (!r) throw Error('Choose a documents folder in Settings first.'); if (await r.handle.queryPermission({ mode: 'readwrite' }) !== 'granted') throw Error('Allow documents folder access in Settings, then try again.'); return r; }
+    async function access(r) { if (!r) throw Error('Choose a documents folder in Settings first.'); if (await r.handle.queryPermission({ mode: 'readwrite' }) !== 'granted') throw Error('Chrome needs your OK to use the documents folder again: click Allow folder access in Library.'); return r; }
     async function current() { return access(await db.get(KEY)); }
     async function lease(token, owner, files = true) {
       const r = files ? await current() : await db.get(KEY), run = await db.get(RUN);
