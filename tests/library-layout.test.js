@@ -122,6 +122,17 @@ async function test(name, fn) { try { await fn(); console.log('PASS ' + name); }
     const r = await write(e, 'Attachments and Links/guide.pdf', 'the cleaned copy', 5);
     assert.equal(r.skip, true); assert.equal(r.path, 'Attachments and Links/guide (2).pdf'); assert.equal(d.state.writes.length, 0);   // not saved a third time
   });
+  await test('a same-size older revision does not stand in for a deleted attachment this extension saved', async () => {
+    const e = env(), d = await library([5], [1, 2, 3, 4]), sha = t => createHash('sha256').update(t).digest('hex');
+    await d.put(`${FOLDER}/Attachments and Links/photo.jpg`, 'old photo');            // 9 bytes, like the revision below
+    await e.repo.connect(d, LIB);
+    e.map.get('documentsConnection').progress[LI] = { version: 5, mdate: '2026-11-12', ok: true, files: [{ name: 'photo (v5).jpg', size: 9, sha256: sha('new photo') }] };
+    const gone = await e.repo.inventory({ index: [item(5)], done: {} });
+    assert.deepEqual(gone.rows[0].missingAttachments, ['Attachments and Links/photo (v5).jpg']);
+    await d.put(`${FOLDER}/Attachments and Links/photo (2).jpg`, 'new photo');         // the same bytes under another family name
+    const kept = await e.repo.inventory({ index: [item(5)], done: {} });
+    assert.deepEqual(kept.rows[0].missingAttachments, []);
+  });
   await test('two different files with one name are both kept where they are', async () => {
     const e = env(), d = await library([4, 5], [1, 2, 3]);
     await d.put(`${FOLDER}/${OLD}/${LI}_v4.pdf`, '%PDF-1.7\nanother copy of version 4\n%%EOF');
