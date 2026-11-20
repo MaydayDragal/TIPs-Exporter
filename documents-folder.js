@@ -150,7 +150,7 @@
     }
     function expectedAttachments(r, tips, row) {
       return [...(row?.attachmentInventory ? CSV.normalizeAttachmentInventory(row.attachmentInventory).files : []),
-        ...(r.progress?.[tips]?.files || []).map(f => ({ path: r.attachmentFolder + '/' + f.name, size: f.size }))];
+        ...(r.progress?.[tips]?.files || []).map(f => ({ path: r.attachmentFolder + '/' + f.name, size: f.size, ...(f.sha256 ? { sha256: f.sha256 } : {}) }))];
     }
     async function scan(r, snapshot = {}) {
       snapshot = await exceptionSnapshot(r, snapshot);
@@ -162,7 +162,7 @@
         const pdfIds = [...new Set(list.filter(x => x.kind === 'file').map(x => PDF.exec(x.name)?.[1]?.toUpperCase()).filter(Boolean))];
         const tips = hinted || (pdfIds.length === 1 ? pdfIds[0] : null); let topic = null;
         if (tips && path) {
-          const versions = [], invalid = [], notes = [], attachments = [], attachmentHandle = await entry(d, r.attachmentFolder, 'directory');
+          const versions = [], invalid = [], notes = [], attachments = [], attachmentHandles = new Map(), attachmentHandle = await entry(d, r.attachmentFolder, 'directory');
           // LI Library layout: PDFs in the earlier-versions subfolder are versions of this document, not a second folder.
           const earlier = [], olderHandle = r.olderFolder ? await entry(d, r.olderFolder, 'directory') : null;
           if (olderHandle) for await (const f of olderHandle.values()) { if (++visited > 100000) throw Error('Folder scan exceeded 100,000 entries.'); earlier.push(f); }
@@ -177,14 +177,24 @@
             for await (const f of dir.values()) {
               if (++visited > 100000) throw Error('Folder scan exceeded 100,000 entries.');
               const relative = prefix + '/' + f.name;
-              if (f.kind === 'file') { const file = await f.getFile(); attachments.push({ path: relative, size: file.size, lastModified: file.lastModified || 0 }); }
+              if (f.kind === 'file') { const file = await f.getFile(); attachments.push({ path: relative, size: file.size, lastModified: file.lastModified || 0 }); attachmentHandles.set(relative, file); }
               else { if (level >= 8) throw Error('Attachment scan exceeded 8 nested levels.'); await attachmentsIn(f, relative, level + 1); }
             }
           }
           if (attachmentHandle) await attachmentsIn(attachmentHandle, r.attachmentFolder);
           const last = r.progress?.[tips] || null;
           const expected = expectedAttachments(r, tips, indexByNumber.get(tips));
-          const missingAttachments = [...new Set(expected.filter(f => !attachments.some(a => a.size === f.size && (a.path.toLowerCase() === f.path.toLowerCase() || familyOf(a.path) === familyOf(f.path)))).map(f => f.path))];
+          // A same-size file under another name of the family counts as the expected one. When this extension saved the
+          // file itself it also recorded its SHA-256; then the stand-in must have those exact bytes, so an older revision
+          // that happens to have the same size (photo.jpg beside a deleted photo (v5).jpg) does not hide a missing file.
+          const sums = new Map(), sumOf = async a => { if (!sums.has(a.path)) sums.set(a.path, digest(await attachmentHandles.get(a.path).arrayBuffer()).catch(() => '')); return sums.get(a.path); };
+          const missingAttachments = [];
+          for (const f of expected) {
+            if (attachments.some(a => a.size === f.size && a.path.toLowerCase() === f.path.toLowerCase())) continue;
+            let present = false;
+            for (const a of attachments) if (a.size === f.size && familyOf(a.path) === familyOf(f.path) && (!f.sha256 || await sumOf(a) === f.sha256)) { present = true; break; }
+            if (!present && !missingAttachments.includes(f.path)) missingAttachments.push(f.path);
+          }
           topic = { tips, path, versions: [...new Set(versions)].sort((a,b) => a-b), invalid: [...new Set(invalid)].sort((a,b) => a-b), attachments: attachments.length, attachmentFiles: attachments, missingAttachments, notes, last, baseline: r.baseline?.[tips] || null };
           if (!found.has(tips)) found.set(tips, []); found.get(tips).push(topic);
         }
